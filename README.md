@@ -44,5 +44,43 @@ npm run dev
 
 ---
 
-### 🌐 Testnet Deployment (Coming Soon to Sepolia!)
-We will be launching a live testnet version of NexusDEX on the Sepolia network shortly. Stay tuned!
+## 🌐 Deploy to Sepolia Testnet
+
+You can deploy the complete DEX stack (WETH9, DexFactory, DexRouter, Mock Tokens, and initial liquidity pools) directly to Ethereum Sepolia.
+
+### 1. Configure Environment Variables
+Copy `.env.example` to `.env`:
+```bash
+cp .env.example .env
+```
+Fill in your configuration:
+- `SEPOLIA_RPC_URL`: `https://ethereum-sepolia-rpc.publicnode.com` (or your Alchemy/Infura URL)
+- `PRIVATE_KEY`: Your wallet's private key (make sure it has some Sepolia testnet ETH for gas)
+- `ETHERSCAN_API_KEY`: *(Optional)* For automatic contract verification
+
+### 2. Run the Sepolia Deployment Script
+Execute the deployment using Foundry:
+```bash
+forge script script/DeploySepolia.s.sol --rpc-url sepolia --broadcast
+```
+
+*(Optional: To verify contracts on Etherscan during deployment, add `--verify`)*:
+```bash
+forge script script/DeploySepolia.s.sol --rpc-url sepolia --broadcast --verify
+```
+
+### 3. What the Deployment Does
+- Deploys **WETH9**, **DexFactory**, and **DexRouter**.
+- Deploys test tokens **10X** and **AYO**, minting initial balances to your deployer wallet.
+- Automatically creates and seeds the **10X / AYO** liquidity pool on-chain.
+- If your wallet holds $\ge 0.02$ Sepolia ETH, it also seeds initial ETH pools (**10X / ETH** and **AYO / ETH**).
+- Automatically exports all deployed contract addresses into `frontend/src/utils/addresses.json`.
+
+### 4. Test on Frontend
+Start the frontend and switch your MetaMask network to **Sepolia**:
+```bash
+cd frontend
+npm run dev
+```
+The dApp will automatically connect to your deployed Sepolia contracts!
+

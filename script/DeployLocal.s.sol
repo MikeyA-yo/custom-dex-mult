@@ -64,6 +64,7 @@ contract DeployLocal is Script {
             '  "TokenAyo": "', vm.toString(address(tokenAyo)), '"\n',
             '}'
         );
+        vm.writeFile("frontend/src/utils/addresses.anvil.json", json);
         vm.writeFile("frontend/src/utils/addresses.json", json);
 
         console.log("Deployed successfully!");

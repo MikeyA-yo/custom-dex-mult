@@ -9,3 +9,7 @@ fs_permissions = [{ access = "read-write", path = "./"}]
 
 [profile.default.fuzz]
 runs = 256
+
+[rpc_endpoints]
+sepolia = "https://ethereum-sepolia-rpc.publicnode.com"
+
