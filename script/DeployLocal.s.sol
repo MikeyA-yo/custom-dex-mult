@@ -33,36 +33,35 @@ contract DeployLocal is Script {
         tokenAyo.approve(address(router), type(uint256).max);
 
         router.addLiquidity(
-            address(token10x),
-            address(tokenAyo),
-            10_000 ether,
-            10_000 ether,
-            0,
-            0,
-            deployer,
-            block.timestamp + 1000
+            address(token10x), address(tokenAyo), 10_000 ether, 10_000 ether, 0, 0, deployer, block.timestamp + 1000
         );
 
         // Let's also add some liquidity with WETH for both tokens
-        router.addLiquidityETH{value: 10 ether}(
-            address(token10x), 10_000 ether, 0, 0, deployer, block.timestamp + 1000
-        );
-        
-        router.addLiquidityETH{value: 10 ether}(
-            address(tokenAyo), 10_000 ether, 0, 0, deployer, block.timestamp + 1000
-        );
+        router.addLiquidityETH{value: 10 ether}(address(token10x), 10_000 ether, 0, 0, deployer, block.timestamp + 1000);
+
+        router.addLiquidityETH{value: 10 ether}(address(tokenAyo), 10_000 ether, 0, 0, deployer, block.timestamp + 1000);
 
         vm.stopBroadcast();
 
         // 4. Export addresses to JSON for the frontend
         string memory json = string.concat(
-            '{\n',
-            '  "WETH": "', vm.toString(address(weth)), '",\n',
-            '  "Factory": "', vm.toString(address(factory)), '",\n',
-            '  "Router": "', vm.toString(address(router)), '",\n',
-            '  "Token10x": "', vm.toString(address(token10x)), '",\n',
-            '  "TokenAyo": "', vm.toString(address(tokenAyo)), '"\n',
-            '}'
+            "{\n",
+            '  "WETH": "',
+            vm.toString(address(weth)),
+            '",\n',
+            '  "Factory": "',
+            vm.toString(address(factory)),
+            '",\n',
+            '  "Router": "',
+            vm.toString(address(router)),
+            '",\n',
+            '  "Token10x": "',
+            vm.toString(address(token10x)),
+            '",\n',
+            '  "TokenAyo": "',
+            vm.toString(address(tokenAyo)),
+            '"\n',
+            "}"
         );
         vm.writeFile("frontend/src/utils/addresses.anvil.json", json);
         vm.writeFile("frontend/src/utils/addresses.json", json);

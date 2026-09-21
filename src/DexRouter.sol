@@ -131,8 +131,9 @@ contract DexRouter {
         address to,
         uint256 deadline
     ) public ensure(deadline) returns (uint256 amountToken, uint256 amountETH) {
-        (amountToken, amountETH) =
-            removeLiquidity(token, WETH, liquidity, amountTokenMin, amountETHMin, address(this), deadline);
+        (amountToken, amountETH) = removeLiquidity(
+            token, WETH, liquidity, amountTokenMin, amountETHMin, address(this), deadline
+        );
         _safeTransfer(token, to, amountToken);
         IWETH(WETH).withdraw(amountETH);
         _safeTransferETH(to, amountETH);
@@ -286,8 +287,7 @@ contract DexRouter {
     // ──────────────────────────────────────────────
 
     function _safeTransfer(address token, address to, uint256 value) private {
-        (bool success, bytes memory data) =
-            token.call(abi.encodeWithSelector(IERC20.transfer.selector, to, value));
+        (bool success, bytes memory data) = token.call(abi.encodeWithSelector(IERC20.transfer.selector, to, value));
         require(success && (data.length == 0 || abi.decode(data, (bool))), "DexRouter: TRANSFER_FAILED");
     }
 

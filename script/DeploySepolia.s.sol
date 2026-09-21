@@ -14,7 +14,7 @@ contract DeploySepolia is Script {
         if (deployerPrivateKey == 0) {
             deployerPrivateKey = vm.envOr("PRIVATE_KEY", uint256(0));
         }
-        
+
         address deployer;
         if (deployerPrivateKey != 0) {
             deployer = vm.addr(deployerPrivateKey);
@@ -44,34 +44,17 @@ contract DeploySepolia is Script {
         tokenAyo.approve(address(router), type(uint256).max);
 
         router.addLiquidity(
-            address(token10x),
-            address(tokenAyo),
-            10_000 ether,
-            10_000 ether,
-            0,
-            0,
-            deployer,
-            block.timestamp + 1800
+            address(token10x), address(tokenAyo), 10_000 ether, 10_000 ether, 0, 0, deployer, block.timestamp + 1800
         );
 
         // If deployer has some spare Sepolia ETH, we can seed small liquidity with ETH
         if (deployer.balance >= 0.02 ether) {
             router.addLiquidityETH{value: 0.005 ether}(
-                address(token10x),
-                500 ether,
-                0,
-                0,
-                deployer,
-                block.timestamp + 1800
+                address(token10x), 500 ether, 0, 0, deployer, block.timestamp + 1800
             );
 
             router.addLiquidityETH{value: 0.005 ether}(
-                address(tokenAyo),
-                500 ether,
-                0,
-                0,
-                deployer,
-                block.timestamp + 1800
+                address(tokenAyo), 500 ether, 0, 0, deployer, block.timestamp + 1800
             );
             console.log("Seeded ETH liquidity with 0.01 Sepolia ETH total!");
         } else {
@@ -82,13 +65,23 @@ contract DeploySepolia is Script {
 
         // 4. Export addresses to JSON for the frontend
         string memory json = string.concat(
-            '{\n',
-            '  "WETH": "', vm.toString(address(weth)), '",\n',
-            '  "Factory": "', vm.toString(address(factory)), '",\n',
-            '  "Router": "', vm.toString(address(router)), '",\n',
-            '  "Token10x": "', vm.toString(address(token10x)), '",\n',
-            '  "TokenAyo": "', vm.toString(address(tokenAyo)), '"\n',
-            '}'
+            "{\n",
+            '  "WETH": "',
+            vm.toString(address(weth)),
+            '",\n',
+            '  "Factory": "',
+            vm.toString(address(factory)),
+            '",\n',
+            '  "Router": "',
+            vm.toString(address(router)),
+            '",\n',
+            '  "Token10x": "',
+            vm.toString(address(token10x)),
+            '",\n',
+            '  "TokenAyo": "',
+            vm.toString(address(tokenAyo)),
+            '"\n',
+            "}"
         );
         vm.writeFile("frontend/src/utils/addresses.sepolia.json", json);
         vm.writeFile("frontend/src/utils/addresses.json", json);

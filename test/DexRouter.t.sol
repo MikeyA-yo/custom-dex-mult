@@ -64,9 +64,8 @@ contract DexRouterTest is Test {
 
     function test_addLiquidity_createsPairAndMints() public {
         vm.prank(user);
-        (uint256 amountA, uint256 amountB, uint256 liquidity) = router.addLiquidity(
-            address(tokenA), address(tokenB), 5 ether, 10 ether, 4 ether, 9 ether, user, DEADLINE
-        );
+        (uint256 amountA, uint256 amountB, uint256 liquidity) =
+            router.addLiquidity(address(tokenA), address(tokenB), 5 ether, 10 ether, 4 ether, 9 ether, user, DEADLINE);
 
         assertEq(amountA, 5 ether);
         assertEq(amountB, 10 ether);
@@ -81,9 +80,8 @@ contract DexRouterTest is Test {
 
         // Add more liquidity — should maintain 1:2 ratio
         vm.prank(user);
-        (uint256 amountA, uint256 amountB,) = router.addLiquidity(
-            address(tokenA), address(tokenB), 5 ether, 20 ether, 0, 0, user, DEADLINE
-        );
+        (uint256 amountA, uint256 amountB,) =
+            router.addLiquidity(address(tokenA), address(tokenB), 5 ether, 20 ether, 0, 0, user, DEADLINE);
 
         // amountB should be adjusted to maintain ratio
         assertEq(amountA, 5 ether);

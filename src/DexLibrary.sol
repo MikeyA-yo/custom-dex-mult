@@ -41,7 +41,8 @@ library DexLibrary {
     {
         (address token0,) = sortTokens(tokenA, tokenB);
         (uint112 reserve0, uint112 reserve1,) = IDexPair(pairFor(factory, tokenA, tokenB)).getReserves();
-        (reserveA, reserveB) = tokenA == token0 ? (uint256(reserve0), uint256(reserve1)) : (uint256(reserve1), uint256(reserve0));
+        (reserveA, reserveB) =
+            tokenA == token0 ? (uint256(reserve0), uint256(reserve1)) : (uint256(reserve1), uint256(reserve0));
     }
 
     /// @notice Given some amount of an asset and pair reserves, returns an equivalent amount of the other asset

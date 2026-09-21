@@ -13,3 +13,7 @@ runs = 256
 [rpc_endpoints]
 sepolia = "https://ethereum-sepolia-rpc.publicnode.com"
 
+[profile.ci]
+fuzz = { runs = 256 }
+
+
