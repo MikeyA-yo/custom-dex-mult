@@ -1,4 +1,4 @@
-# NexusDEX - Constant Product AMM
+# 10x DEX - Constant Product AMM
 
 A custom-built Decentralized Exchange (DEX) using the Constant Product AMM model ($x \times y = k$). Features complete smart contracts with Router, Factory, Pair implementations and a premium, glassmorphic React frontend.
 

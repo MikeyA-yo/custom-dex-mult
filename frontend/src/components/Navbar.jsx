@@ -114,7 +114,7 @@ export default function Navbar() {
         </div>
         <div>
           <h1 style={{ margin: 0, fontSize: '1.5rem', fontWeight: 'bold' }} className="text-gradient">
-            NexusDEX
+            10x DEX
           </h1>
         </div>
       </div>
