@@ -277,12 +277,15 @@ export default function PoolCard() {
         </button>
       ) : !isCorrectNetwork ? (
         <button
-          className="btn btn-primary"
+          className="btn"
           style={{
             width: '100%',
-            padding: '16px',
-            fontSize: '1rem',
-            background: 'linear-gradient(135deg, #ef4444, #f97316)',
+            padding: '15px',
+            fontSize: '0.98rem',
+            background: '#b91c1c',
+            color: '#ffffff',
+            fontWeight: 600,
+            borderRadius: '14px',
           }}
           onClick={() => switchWalletToNetwork(selectedNetwork)}
         >

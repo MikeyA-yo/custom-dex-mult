@@ -1,16 +1,22 @@
 import React, { createContext, useContext, useState, useEffect, useCallback, useMemo } from 'react';
+import { useAccount, useConnect, useDisconnect, useSwitchChain } from 'wagmi';
+import { sepolia } from 'wagmi/chains';
 import { ethers } from 'ethers';
 import { NETWORKS, ABIS } from '../utils/contracts';
 
 const Web3Context = createContext(null);
 
 export function Web3Provider({ children }) {
-  const [provider, setProvider] = useState(null);
-  const [signer, setSigner] = useState(null);
-  const [account, setAccount] = useState('');
-  const [isConnecting, setIsConnecting] = useState(false);
-  const [walletChainId, setWalletChainId] = useState(null);
+  // Wagmi hooks
+  const { address, isConnected, chainId: wagmiChainId, status } = useAccount();
+  const { connectAsync, connectors, isPending: isConnectPending } = useConnect();
+  const { disconnect } = useDisconnect();
+  const { switchChainAsync } = useSwitchChain();
+
   const [selectedNetwork, setSelectedNetwork] = useState('sepolia'); // 'sepolia' | 'anvil'
+  const [signer, setSigner] = useState(null);
+  const [provider, setProvider] = useState(null);
+  const [switchError, setSwitchError] = useState(null);
 
   const activeNetworkConfig = useMemo(() => {
     return NETWORKS[selectedNetwork] || NETWORKS.sepolia;
@@ -18,9 +24,9 @@ export function Web3Provider({ children }) {
 
   const tokens = activeNetworkConfig.tokens;
   const addresses = activeNetworkConfig.addresses;
-  const isCorrectNetwork = walletChainId === activeNetworkConfig.chainId;
+  const isCorrectNetwork = wagmiChainId === activeNetworkConfig.chainId;
 
-  // Dedicated read-only provider for active tab (bypasses MetaMask RPC mismatches)
+  // Dedicated read-only fallback provider
   const readProvider = useMemo(() => {
     try {
       return new ethers.JsonRpcProvider(activeNetworkConfig.rpcUrl);
@@ -29,189 +35,175 @@ export function Web3Provider({ children }) {
     }
   }, [activeNetworkConfig.rpcUrl]);
 
-  // Contracts: use signer if wallet matches network, otherwise use readProvider
-  const [router, setRouter] = useState(null);
-  const [factory, setFactory] = useState(null);
-
+  // Sync ethers signer whenever address, chain, or window.ethereum changes
   useEffect(() => {
-    const rAddr = activeNetworkConfig.addresses.Router;
-    const fAddr = activeNetworkConfig.addresses.Factory;
-
-    if (signer && isCorrectNetwork) {
-      setRouter(new ethers.Contract(rAddr, ABIS.Router, signer));
-      setFactory(new ethers.Contract(fAddr, ABIS.Factory, signer));
-    } else if (readProvider) {
-      setRouter(new ethers.Contract(rAddr, ABIS.Router, readProvider));
-      setFactory(new ethers.Contract(fAddr, ABIS.Factory, readProvider));
-    } else {
-      setRouter(null);
-      setFactory(null);
-    }
-  }, [signer, isCorrectNetwork, activeNetworkConfig, readProvider]);
-
-  const connectWallet = useCallback(async () => {
-    if (typeof window.ethereum === 'undefined') {
-      alert('Please install MetaMask to use this dApp!');
-      return;
-    }
-
-    try {
-      setIsConnecting(true);
-      const browserProvider = new ethers.BrowserProvider(window.ethereum);
-      const accounts = await browserProvider.send("eth_requestAccounts", []);
-      const signerInstance = await browserProvider.getSigner();
-      const network = await browserProvider.getNetwork();
-      const numChainId = Number(network.chainId);
-
-      setProvider(browserProvider);
-      setSigner(signerInstance);
-      setAccount(accounts[0]);
-      setWalletChainId(numChainId);
-
-      // Auto-select network tab matching the wallet's current chain
-      if (numChainId === NETWORKS.sepolia.chainId) {
-        setSelectedNetwork('sepolia');
-      } else if (numChainId === NETWORKS.anvil.chainId) {
-        setSelectedNetwork('anvil');
-      }
-    } catch (error) {
-      console.error("Connection error:", error);
-    } finally {
-      setIsConnecting(false);
-    }
-  }, []);
-
-  const switchWalletToNetwork = useCallback(async (networkKey) => {
-    if (typeof window.ethereum === 'undefined') {
-      setSelectedNetwork(networkKey);
-      return;
-    }
-    const target = NETWORKS[networkKey];
-    if (!target) return;
-
-    try {
-      await window.ethereum.request({
-        method: 'wallet_switchEthereumChain',
-        params: [{ chainId: target.chainIdHex }],
-      });
-      setSelectedNetwork(networkKey);
-    } catch (switchError) {
-      // Chain not added to MetaMask yet (error code 4902)
-      if (switchError.code === 4902 || switchError.data?.originalError?.code === 4902) {
+    let active = true;
+    const updateSigner = async () => {
+      if (isConnected && address && typeof window !== 'undefined' && window.ethereum) {
         try {
-          const params = {
-            chainId: target.chainIdHex,
-            chainName: target.name,
-            nativeCurrency: target.currency,
-            rpcUrls: [target.rpcUrl],
-          };
-          if (target.explorerUrl) {
-            params.blockExplorerUrls = [target.explorerUrl];
+          const browserProvider = new ethers.BrowserProvider(window.ethereum, 'any');
+          const s = await browserProvider.getSigner();
+          if (active) {
+            setProvider(browserProvider);
+            setSigner(s);
           }
+        } catch (err) {
+          console.error("Failed to acquire signer:", err);
+          if (active) setSigner(null);
+        }
+      } else {
+        if (active) {
+          setSigner(null);
+          setProvider(null);
+        }
+      }
+    };
+    updateSigner();
+    return () => {
+      active = false;
+    };
+  }, [isConnected, address, wagmiChainId]);
+
+  // Network Switch Function using Wagmi
+  const switchWalletToNetwork = useCallback(async (networkKey) => {
+    setSwitchError(null);
+    const target = NETWORKS[networkKey];
+    if (!target) return false;
+
+    try {
+      if (switchChainAsync) {
+        await switchChainAsync({ chainId: target.chainId });
+      } else if (typeof window !== 'undefined' && window.ethereum) {
+        await window.ethereum.request({
+          method: 'wallet_switchEthereumChain',
+          params: [{ chainId: target.chainIdHex }],
+        });
+      }
+      setSelectedNetwork(networkKey);
+      return true;
+    } catch (err) {
+      console.warn("Wagmi switchChain error, attempting addEthereumChain if code 4902:", err);
+      // If chain not added to wallet
+      if (err?.code === 4902 || err?.data?.originalError?.code === 4902 || err?.message?.includes('4902')) {
+        try {
           await window.ethereum.request({
             method: 'wallet_addEthereumChain',
-            params: [params],
+            params: [{
+              chainId: target.chainIdHex,
+              chainName: target.name,
+              nativeCurrency: target.currency,
+              rpcUrls: [target.rpcUrl],
+              blockExplorerUrls: target.explorerUrl ? [target.explorerUrl] : [],
+            }],
           });
           setSelectedNetwork(networkKey);
-        } catch (addError) {
-          console.error("Failed to add network:", addError);
+          return true;
+        } catch (addErr) {
+          console.error("Failed to add network:", addErr);
+          setSwitchError(addErr.message);
         }
       } else {
-        console.error("Failed to switch network:", switchError);
+        setSwitchError(err.message || 'Failed to switch network');
       }
+      return false;
     }
-  }, []);
+  }, [switchChainAsync]);
 
-  const syncWallet = useCallback(async () => {
-    if (typeof window.ethereum === 'undefined') return;
+  // Automatic Switch to Sepolia:
+  // Lead engineer reported having to manually switch and it failed on his end.
+  // Whenever the user is connected and not on Sepolia while Sepolia is selected, automatically trigger the switch!
+  useEffect(() => {
+    if (isConnected && wagmiChainId && selectedNetwork === 'sepolia' && wagmiChainId !== sepolia.id) {
+      console.log(`Auto-switching to Sepolia (${sepolia.id}) from current chain ${wagmiChainId}`);
+      switchWalletToNetwork('sepolia');
+    }
+  }, [isConnected, wagmiChainId, selectedNetwork, switchWalletToNetwork]);
+
+  // Connect Wallet using Wagmi with direct target chain
+  const connectWallet = useCallback(async () => {
     try {
-      const browserProvider = new ethers.BrowserProvider(window.ethereum);
-      const accounts = await browserProvider.send("eth_accounts", []);
-      if (accounts.length > 0) {
-        const signerInstance = await browserProvider.getSigner();
-        const network = await browserProvider.getNetwork();
-        const numChainId = Number(network.chainId);
-
-        setProvider(browserProvider);
-        setSigner(signerInstance);
-        setAccount(accounts[0]);
-        setWalletChainId(numChainId);
-
-        if (numChainId === NETWORKS.sepolia.chainId) {
-          setSelectedNetwork('sepolia');
-        } else if (numChainId === NETWORKS.anvil.chainId) {
-          setSelectedNetwork('anvil');
+      setSwitchError(null);
+      // Prefer injected (MetaMask, Rabby, etc.)
+      const injectedConnector = connectors.find((c) => c.id === 'injected' || c.id === 'metaMask') || connectors[0];
+      if (!injectedConnector) {
+        if (typeof window !== 'undefined' && !window.ethereum) {
+          alert('Please install MetaMask or a Web3 wallet extension to use 10x DEX!');
+          return;
         }
-      } else {
-        setAccount('');
-        setSigner(null);
-        setWalletChainId(null);
+      }
+
+      await connectAsync({
+        connector: injectedConnector,
+        chainId: selectedNetwork === 'anvil' ? 31337 : sepolia.id,
+      });
+
+      // Ensure chain matches selectedNetwork
+      const targetChainId = selectedNetwork === 'anvil' ? 31337 : sepolia.id;
+      if (wagmiChainId && wagmiChainId !== targetChainId) {
+        await switchWalletToNetwork(selectedNetwork);
       }
     } catch (err) {
-      console.error("Error syncing wallet:", err);
+      console.error("Wagmi connect error:", err);
     }
-  }, []);
-
-  // Sync wallet state on initial load
-  useEffect(() => {
-    syncWallet();
-  }, [syncWallet]);
-
-  // Listen to MetaMask account / chain changes
-  useEffect(() => {
-    if (window.ethereum) {
-      const handleAccountsChanged = (accounts) => {
-        if (accounts.length > 0) {
-          syncWallet();
-        } else {
-          setAccount('');
-          setSigner(null);
-          setWalletChainId(null);
-        }
-      };
-
-      const handleChainChanged = () => {
-        syncWallet();
-      };
-
-      window.ethereum.on('accountsChanged', handleAccountsChanged);
-      window.ethereum.on('chainChanged', handleChainChanged);
-
-      return () => {
-        window.ethereum.removeListener('accountsChanged', handleAccountsChanged);
-        window.ethereum.removeListener('chainChanged', handleChainChanged);
-      };
-    }
-  }, [syncWallet]);
+  }, [connectors, connectAsync, selectedNetwork, wagmiChainId, switchWalletToNetwork]);
 
   const disconnectWallet = useCallback(() => {
-    setAccount('');
+    disconnect();
     setSigner(null);
-    setWalletChainId(null);
     setProvider(null);
-  }, []);
+  }, [disconnect]);
+
+  // Contracts: signer if connected to the right network, otherwise fallback to readProvider
+  const router = useMemo(() => {
+    const rAddr = activeNetworkConfig.addresses?.Router;
+    if (!rAddr) return null;
+    if (signer && isCorrectNetwork) {
+      return new ethers.Contract(rAddr, ABIS.Router, signer);
+    }
+    if (readProvider) {
+      return new ethers.Contract(rAddr, ABIS.Router, readProvider);
+    }
+    return null;
+  }, [signer, isCorrectNetwork, activeNetworkConfig, readProvider]);
+
+  const factory = useMemo(() => {
+    const fAddr = activeNetworkConfig.addresses?.Factory;
+    if (!fAddr) return null;
+    if (signer && isCorrectNetwork) {
+      return new ethers.Contract(fAddr, ABIS.Factory, signer);
+    }
+    if (readProvider) {
+      return new ethers.Contract(fAddr, ABIS.Factory, readProvider);
+    }
+    return null;
+  }, [signer, isCorrectNetwork, activeNetworkConfig, readProvider]);
 
   return (
-    <Web3Context.Provider value={{
-      provider,
-      readProvider,
-      signer,
-      account,
-      walletChainId,
-      chainId: walletChainId,
-      isConnecting,
-      connectWallet,
-      disconnectWallet,
-      selectedNetwork,
-      setSelectedNetwork,
-      activeNetworkConfig,
-      switchWalletToNetwork,
-      isCorrectNetwork,
-      tokens,
-      addresses,
-      router,
-      factory,
-    }}>
+    <Web3Context.Provider
+      value={{
+        provider,
+        readProvider,
+        signer,
+        account: address || '',
+        address: address || '',
+        isConnected,
+        isConnecting: isConnectPending || status === 'connecting',
+        walletChainId: wagmiChainId,
+        chainId: wagmiChainId,
+        selectedNetwork,
+        setSelectedNetwork,
+        activeNetworkConfig,
+        isCorrectNetwork,
+        connectWallet,
+        disconnectWallet,
+        switchWalletToNetwork,
+        switchError,
+        tokens,
+        addresses,
+        router,
+        factory,
+      }}
+    >
       {children}
     </Web3Context.Provider>
   );

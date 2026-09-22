@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Copy, Check, ExternalLink, PlusCircle, Layers, Coins, Globe, Server } from 'lucide-react';
+import { Copy, Check, ExternalLink, PlusCircle, Globe, Server } from 'lucide-react';
 import { useWeb3 } from '../hooks/useWeb3';
 
 export default function ContractsInfoCard() {
@@ -55,9 +55,10 @@ export default function ContractsInfoCard() {
         <span style={{
           fontSize: '0.75rem',
           padding: '4px 10px',
-          borderRadius: '12px',
-          background: selectedNetwork === 'sepolia' ? 'rgba(139, 92, 246, 0.2)' : 'rgba(6, 182, 212, 0.2)',
-          color: selectedNetwork === 'sepolia' ? '#c4b5fd' : '#67e8f9',
+          borderRadius: '10px',
+          background: '#141a27',
+          border: '1px solid #232d42',
+          color: '#60a5fa',
           fontWeight: 600,
         }}>
           Chain ID: {activeNetworkConfig.chainId}
@@ -94,11 +95,11 @@ export default function ContractsInfoCard() {
                       display: 'flex',
                       alignItems: 'center',
                       gap: '4px',
-                      background: 'rgba(255, 255, 255, 0.08)',
-                      border: 'none',
+                      background: '#151b26',
+                      border: '1px solid #232c3d',
                       borderRadius: '8px',
                       padding: '4px 8px',
-                      color: 'var(--accent-secondary)',
+                      color: '#60a5fa',
                       fontSize: '0.75rem',
                       cursor: 'pointer',
                     }}

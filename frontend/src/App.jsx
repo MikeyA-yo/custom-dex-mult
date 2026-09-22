@@ -104,55 +104,79 @@ function DexContent() {
         {/* 3. DEX Feature Tabs (Swap / Pool / Contracts) */}
         <div style={{
           display: 'flex',
-          gap: '8px',
+          background: '#0d111a',
+          border: '1px solid #1a2232',
+          borderRadius: '14px',
+          padding: '4px',
           marginBottom: '20px',
-          justifyContent: 'center',
+          gap: '4px',
         }}>
           <button
-            className={`btn ${activeTab === 'swap' ? 'btn-primary' : 'btn-secondary'}`}
             onClick={() => setActiveTab('swap')}
             style={{
-              padding: '8px 20px',
-              borderRadius: '20px',
-              fontSize: '0.9rem',
+              flex: 1,
+              padding: '8px 16px',
+              borderRadius: '10px',
+              fontSize: '0.88rem',
+              fontWeight: 600,
               display: 'flex',
               alignItems: 'center',
+              justifyContent: 'center',
               gap: '6px',
+              border: activeTab === 'swap' ? '1px solid #28354a' : '1px solid transparent',
+              background: activeTab === 'swap' ? '#171f2e' : 'transparent',
+              color: activeTab === 'swap' ? '#ffffff' : 'var(--text-secondary)',
+              cursor: 'pointer',
+              transition: 'all 0.15s ease',
             }}
           >
-            <ArrowLeftRight size={15} />
+            <ArrowLeftRight size={14} />
             <span>Swap</span>
           </button>
 
           <button
-            className={`btn ${activeTab === 'pool' ? 'btn-primary' : 'btn-secondary'}`}
             onClick={() => setActiveTab('pool')}
             style={{
-              padding: '8px 20px',
-              borderRadius: '20px',
-              fontSize: '0.9rem',
+              flex: 1,
+              padding: '8px 16px',
+              borderRadius: '10px',
+              fontSize: '0.88rem',
+              fontWeight: 600,
               display: 'flex',
               alignItems: 'center',
+              justifyContent: 'center',
               gap: '6px',
+              border: activeTab === 'pool' ? '1px solid #28354a' : '1px solid transparent',
+              background: activeTab === 'pool' ? '#171f2e' : 'transparent',
+              color: activeTab === 'pool' ? '#ffffff' : 'var(--text-secondary)',
+              cursor: 'pointer',
+              transition: 'all 0.15s ease',
             }}
           >
-            <Droplet size={15} />
+            <Droplet size={14} />
             <span>Pool</span>
           </button>
 
           <button
-            className={`btn ${activeTab === 'contracts' ? 'btn-primary' : 'btn-secondary'}`}
             onClick={() => setActiveTab('contracts')}
             style={{
-              padding: '8px 20px',
-              borderRadius: '20px',
-              fontSize: '0.9rem',
+              flex: 1,
+              padding: '8px 16px',
+              borderRadius: '10px',
+              fontSize: '0.88rem',
+              fontWeight: 600,
               display: 'flex',
               alignItems: 'center',
+              justifyContent: 'center',
               gap: '6px',
+              border: activeTab === 'contracts' ? '1px solid #28354a' : '1px solid transparent',
+              background: activeTab === 'contracts' ? '#171f2e' : 'transparent',
+              color: activeTab === 'contracts' ? '#ffffff' : 'var(--text-secondary)',
+              cursor: 'pointer',
+              transition: 'all 0.15s ease',
             }}
           >
-            <Layers size={15} />
+            <Layers size={14} />
             <span>Contracts</span>
           </button>
         </div>
