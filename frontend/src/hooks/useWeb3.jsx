@@ -17,6 +17,8 @@ export function Web3Provider({ children }) {
   const [signer, setSigner] = useState(null);
   const [provider, setProvider] = useState(null);
   const [switchError, setSwitchError] = useState(null);
+  const [dataVersion, setDataVersion] = useState(0);
+  const bumpData = useCallback(() => setDataVersion((version) => version + 1), []);
 
   const activeNetworkConfig = useMemo(() => {
     return NETWORKS[selectedNetwork] || NETWORKS.sepolia;
@@ -202,6 +204,8 @@ export function Web3Provider({ children }) {
         addresses,
         router,
         factory,
+        dataVersion,
+        bumpData,
       }}
     >
       {children}

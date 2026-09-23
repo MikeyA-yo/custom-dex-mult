@@ -1,310 +1,386 @@
-import React, { useState, useEffect } from 'react';
-import { Plus, Wallet, AlertCircle } from 'lucide-react';
+import { useState } from 'react';
+import { ArrowDown } from 'lucide-react';
 import { ethers } from 'ethers';
 import { useWeb3 } from '../hooks/useWeb3';
-import { ABIS } from '../utils/contracts';
+import { useBalances, usePair } from '../hooks/useMarket';
+import { ensureAllowance } from '../utils/dexTx';
+import { pairKind, underlyingSymbol } from '../utils/tokens';
+import {
+  applySlippageDown,
+  deadline,
+  decodeRevert,
+  formatShare,
+  formatTokenAmount,
+  maxSpendableEth,
+  quoteLiquidity,
+  spotOutPerIn,
+  tryParseEther,
+} from '../utils/dexMath';
+import AmountField from './AmountField';
+import PositionsPanel from './PositionsPanel';
+import StatusBanner from './StatusBanner';
 
 export default function PoolCard() {
+  const [mode, setMode] = useState('add');
+  const { activeNetworkConfig } = useWeb3();
+
+  return (
+    <div className="glass-panel dex-card">
+      <div className="card-head">
+        <h2>{mode === 'add' ? 'Add liquidity' : 'Your liquidity'}</h2>
+        <span className="network-pill">{activeNetworkConfig.shortName}</span>
+      </div>
+      <div className="segmented" role="tablist">
+        <button
+          type="button"
+          role="tab"
+          aria-selected={mode === 'add'}
+          className={mode === 'add' ? 'is-active' : undefined}
+          onClick={() => setMode('add')}
+        >
+          Add
+        </button>
+        <button
+          type="button"
+          role="tab"
+          aria-selected={mode === 'positions'}
+          className={mode === 'positions' ? 'is-active' : undefined}
+          onClick={() => setMode('positions')}
+        >
+          Positions
+        </button>
+      </div>
+      {mode === 'add' ? <AddLiquidity /> : <PositionsPanel />}
+    </div>
+  );
+}
+
+function AddLiquidity() {
   const {
     account,
     connectWallet,
     router,
     signer,
-    factory,
-    readProvider,
     tokens,
     isCorrectNetwork,
     selectedNetwork,
     activeNetworkConfig,
     switchWalletToNetwork,
+    bumpData,
   } = useWeb3();
 
-  const [tokenASymbol] = useState('10X');
-  const [tokenBSymbol] = useState('AYO');
+  const [tokenA, setTokenA] = useState('10X');
+  const [tokenB, setTokenB] = useState('AYO');
   const [amountA, setAmountA] = useState('');
   const [amountB, setAmountB] = useState('');
-  const [isApproving, setIsApproving] = useState(false);
-  const [isAdding, setIsAdding] = useState(false);
-  const [reserves, setReserves] = useState([0n, 0n]);
-  const [balanceA, setBalanceA] = useState('0');
-  const [balanceB, setBalanceB] = useState('0');
-  const [isNodeOffline, setIsNodeOffline] = useState(false);
+  const [lastEdited, setLastEdited] = useState('A');
+  const [phase, setPhase] = useState('');
+  const [status, setStatus] = useState(null);
 
-  // Fetch token balances
-  useEffect(() => {
-    let isMounted = true;
-    const fetchBalances = async () => {
-      if (!account || !tokens) return;
-      const targetProvider = (signer && isCorrectNetwork) ? signer : readProvider;
-      if (!targetProvider) return;
+  const { balances, error: balanceError, loaded: balancesLoaded } = useBalances();
+  const pair = usePair(tokenA, tokenB);
+  const kind = pairKind(tokenA, tokenB);
+  const poolEmpty = kind === 'pool' && (!pair.exists || pair.reserveA === 0n || pair.reserveB === 0n);
+  const ratioKnown = kind === 'pool' && pair.exists && pair.reserveA > 0n && pair.reserveB > 0n;
 
-      try {
-        const addrA = tokens[tokenASymbol];
-        const addrB = tokens[tokenBSymbol];
-        if (addrA && addrB) {
-          const cA = new ethers.Contract(addrA, ABIS.ERC20, targetProvider);
-          const cB = new ethers.Contract(addrB, ABIS.ERC20, targetProvider);
-          const [bA, bB] = await Promise.all([cA.balanceOf(account), cB.balanceOf(account)]);
-          if (isMounted) {
-            setBalanceA(ethers.formatEther(bA));
-            setBalanceB(ethers.formatEther(bB));
-            setIsNodeOffline(false);
-          }
-        }
-      } catch (err) {
-        if (isMounted) {
-          setBalanceA('0');
-          setBalanceB('0');
-          if (selectedNetwork === 'anvil') {
-            setIsNodeOffline(true);
-          }
-        }
-      }
-    };
-    fetchBalances();
-  }, [account, signer, isCorrectNetwork, readProvider, tokens, tokenASymbol, tokenBSymbol, selectedNetwork]);
+  const deposit = depositAmounts({
+    amountA,
+    amountB,
+    lastEdited,
+    ratioKnown,
+    reserveA: pair.reserveA,
+    reserveB: pair.reserveB,
+  });
 
-  // Fetch reserves
-  useEffect(() => {
-    let isMounted = true;
-    const fetchReserves = async () => {
-      if (!tokens) return;
-      const targetFactory = factory || (readProvider ? new ethers.Contract(activeNetworkConfig.addresses.Factory, ABIS.Factory, readProvider) : null);
-      if (!targetFactory) return;
+  const shownA = ratioKnown && lastEdited === 'B' && deposit
+    ? ethers.formatEther(deposit.a)
+    : amountA;
+  const shownB = ratioKnown && lastEdited === 'A' && deposit
+    ? ethers.formatEther(deposit.b)
+    : amountB;
 
-      try {
-        const pairAddress = await targetFactory.getPair(tokens[tokenASymbol], tokens[tokenBSymbol]);
-        if (pairAddress && pairAddress !== ethers.ZeroAddress) {
-          const pair = new ethers.Contract(pairAddress, ABIS.Pair, readProvider || signer || factory.runner);
-          const [res0, res1] = await pair.getReserves();
-          const token0 = await pair.token0();
-          if (isMounted) {
-            if (token0.toLowerCase() === tokens[tokenASymbol].toLowerCase()) {
-              setReserves([res0, res1]);
-            } else {
-              setReserves([res1, res0]);
-            }
-            setIsNodeOffline(false);
-          }
-        } else {
-          if (isMounted) setReserves([0n, 0n]);
-        }
-      } catch (err) {
-        if (isMounted) {
-          setReserves([0n, 0n]);
-          if (selectedNetwork === 'anvil') {
-            setIsNodeOffline(true);
-          }
-        }
-      }
-    };
-    fetchReserves();
-  }, [factory, readProvider, signer, isCorrectNetwork, tokenASymbol, tokenBSymbol, tokens, selectedNetwork, activeNetworkConfig]);
+  const spot = ratioKnown ? spotOutPerIn(pair.reserveA, pair.reserveB) : null;
+  const opening = !ratioKnown && deposit && deposit.a > 0n
+    ? (deposit.b * 10n ** 18n) / deposit.a
+    : null;
 
-  const handleAmountAChange = async (val) => {
-    setAmountA(val);
-    if (!val || isNaN(val) || Number(val) <= 0 || !router || reserves[0] === 0n) return;
-    try {
-      const amount = ethers.parseEther(val);
-      const optimalB = await router.quote(amount, reserves[0], reserves[1]);
-      setAmountB(ethers.formatEther(optimalB));
-    } catch (e) {
-      console.error(e);
-    }
+  const chooseA = (symbol) => {
+    if (symbol === tokenB) setTokenB(tokenA);
+    setTokenA(symbol);
+    setAmountA('');
+    setAmountB('');
+    setStatus(null);
   };
 
-  const handleAddLiquidity = async () => {
-    if (!router || !signer || !tokens) return;
+  const chooseB = (symbol) => {
+    if (symbol === tokenA) setTokenA(tokenB);
+    setTokenB(symbol);
+    setAmountA('');
+    setAmountB('');
+    setStatus(null);
+  };
+
+  const flip = () => {
+    const nextAmount = ratioKnown ? shownB : amountB;
+    const otherAmount = ratioKnown ? '' : amountA;
+    setTokenA(tokenB);
+    setTokenB(tokenA);
+    setLastEdited('A');
+    setAmountA(nextAmount);
+    setAmountB(otherAmount);
+    setStatus(null);
+  };
+
+  const action = describeAdd({
+    kind,
+    pair,
+    deposit,
+    tokenA,
+    tokenB,
+    balances,
+    balancesLoaded,
+    phase,
+  });
+
+  const handleAdd = async () => {
+    if (!action.ready || !router || !signer || !tokens || !deposit) return;
+    setStatus(null);
+    const minA = applySlippageDown(deposit.a, 0.5);
+    const minB = applySlippageDown(deposit.b, 0.5);
+    const ttl = deadline(20);
     try {
-      setIsAdding(true);
-      const parsedAmountA = ethers.parseEther(amountA);
-      const parsedAmountB = ethers.parseEther(amountB);
-      const deadline = Math.floor(Date.now() / 1000) + 60 * 20;
-
-      // 1. Approve router to spend tokenA and tokenB
-      setIsApproving(true);
-      const tokenAContract = new ethers.Contract(tokens[tokenASymbol], ABIS.ERC20, signer);
-      const tokenBContract = new ethers.Contract(tokens[tokenBSymbol], ABIS.ERC20, signer);
-
-      const allowanceA = await tokenAContract.allowance(account, await router.getAddress());
-      if (allowanceA < parsedAmountA) {
-        const txApproveA = await tokenAContract.approve(await router.getAddress(), ethers.MaxUint256);
-        await txApproveA.wait();
+      const routerAddress = await router.getAddress();
+      if (tokenA === 'ETH' || tokenB === 'ETH') {
+        const ethIsA = tokenA === 'ETH';
+        const tokenSymbol = ethIsA ? tokenB : tokenA;
+        const tokenAmount = ethIsA ? deposit.b : deposit.a;
+        const ethAmount = ethIsA ? deposit.a : deposit.b;
+        const tokenMin = ethIsA ? minB : minA;
+        const ethMin = ethIsA ? minA : minB;
+        setPhase(`Approving ${tokenSymbol}…`);
+        await ensureAllowance({
+          tokenAddress: tokens[tokenSymbol],
+          owner: account,
+          spender: routerAddress,
+          amount: tokenAmount,
+          signer,
+        });
+        setPhase('Adding liquidity…');
+        const tx = await router.addLiquidityETH(
+          tokens[tokenSymbol],
+          tokenAmount,
+          tokenMin,
+          ethMin,
+          account,
+          ttl,
+          { value: ethAmount },
+        );
+        await tx.wait();
+      } else {
+        setPhase(`Approving ${tokenA}…`);
+        await ensureAllowance({
+          tokenAddress: tokens[tokenA],
+          owner: account,
+          spender: routerAddress,
+          amount: deposit.a,
+          signer,
+        });
+        setPhase(`Approving ${tokenB}…`);
+        await ensureAllowance({
+          tokenAddress: tokens[tokenB],
+          owner: account,
+          spender: routerAddress,
+          amount: deposit.b,
+          signer,
+        });
+        setPhase('Adding liquidity…');
+        const tx = await router.addLiquidity(
+          tokens[tokenA],
+          tokens[tokenB],
+          deposit.a,
+          deposit.b,
+          minA,
+          minB,
+          account,
+          ttl,
+        );
+        await tx.wait();
       }
-
-      const allowanceB = await tokenBContract.allowance(account, await router.getAddress());
-      if (allowanceB < parsedAmountB) {
-        const txApproveB = await tokenBContract.approve(await router.getAddress(), ethers.MaxUint256);
-        await txApproveB.wait();
-      }
-      setIsApproving(false);
-
-      // 2. Add Liquidity (slippage set to 0.5%)
-      const amountAMin = (parsedAmountA * 995n) / 1000n;
-      const amountBMin = (parsedAmountB * 995n) / 1000n;
-
-      const tx = await router.addLiquidity(
-        tokens[tokenASymbol],
-        tokens[tokenBSymbol],
-        parsedAmountA,
-        parsedAmountB,
-        amountAMin,
-        amountBMin,
-        account,
-        deadline
-      );
-      await tx.wait();
-      alert(`Liquidity added successfully on ${activeNetworkConfig.name}!`);
+      setStatus({ type: 'success', text: `Deposited ${tokenA} and ${tokenB} into the pool.` });
       setAmountA('');
       setAmountB('');
+      bumpData();
     } catch (err) {
-      console.error(err);
-      alert('Add liquidity failed. Check console.');
+      setStatus({ type: 'error', text: decodeRevert(err) });
     } finally {
-      setIsApproving(false);
-      setIsAdding(false);
+      setPhase('');
     }
   };
 
-  const formatBalance = (val) => {
-    if (!val || isNaN(val)) return '0.00';
-    const num = parseFloat(val);
-    if (num === 0) return '0.00';
-    if (num < 0.0001) return '< 0.0001';
-    return num.toLocaleString(undefined, { maximumFractionDigits: 4 });
-  };
+  const poolLabel = `${underlyingSymbol(tokenA)} / ${underlyingSymbol(tokenB)}`;
 
   return (
-    <div className="glass-panel" style={{ padding: '24px' }}>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
-        <h2 style={{ margin: 0, fontSize: '1.2rem' }}>Add Liquidity</h2>
-        <span style={{
-          fontSize: '0.8rem',
-          color: 'var(--text-secondary)',
-          background: 'rgba(255, 255, 255, 0.05)',
-          padding: '4px 10px',
-          borderRadius: '12px',
-        }}>
-          {activeNetworkConfig.shortName}
-        </span>
+    <div className="add-liquidity">
+      <p className="lede">
+        Deposit both tokens at the pool price. Liquidity providers earn a 0.3% fee on every swap in this pool.
+      </p>
+      {balanceError ? <StatusBanner type="warning">{balanceError}</StatusBanner> : null}
+      {pair.error ? <StatusBanner type="warning">{pair.error}</StatusBanner> : null}
+      {status ? <StatusBanner type={status.type}>{status.text}</StatusBanner> : null}
+      {kind === 'wrap' ? (
+        <StatusBanner type="info">
+          ETH and WETH are the same asset. Wrap on the Swap tab. A liquidity pool needs 10X or AYO on one side.
+        </StatusBanner>
+      ) : null}
+      {kind === 'pool' && poolEmpty && !pair.loading ? (
+        <StatusBanner type="warning">
+          This pool is empty. The amounts you deposit set the starting price.
+        </StatusBanner>
+      ) : null}
+      {kind === 'pool' && (tokenA === 'ETH' || tokenB === 'ETH') ? (
+        <StatusBanner type="info">
+          ETH is wrapped into WETH and deposited in the {poolLabel} pool.
+        </StatusBanner>
+      ) : null}
+
+      <AmountField
+        label="Deposit"
+        amount={shownA}
+        onAmount={(value) => {
+          setLastEdited('A');
+          setAmountA(value);
+          setStatus(null);
+        }}
+        symbol={tokenA}
+        onSymbol={chooseA}
+        balance={balances[tokenA] ?? 0n}
+        account={account}
+        loading={kind === 'pool' && pair.loading}
+        showQuickAmounts
+      />
+
+      <div className="flip-row">
+        <button type="button" className="flip-btn" onClick={flip} aria-label="Switch tokens">
+          <ArrowDown size={15} />
+        </button>
       </div>
 
-      {isNodeOffline && selectedNetwork === 'anvil' && (
-        <div style={{
-          display: 'flex',
-          alignItems: 'center',
-          gap: '8px',
-          padding: '10px 14px',
-          borderRadius: '12px',
-          background: 'rgba(234, 179, 8, 0.12)',
-          border: '1px solid rgba(234, 179, 8, 0.3)',
-          color: '#fde047',
-          fontSize: '0.85rem',
-          marginBottom: '16px',
-        }}>
-          <AlertCircle size={16} />
-          <span>Local Anvil node not detected at 127.0.0.1:8545. Run <code>anvil</code> in terminal or switch to Sepolia.</span>
-        </div>
-      )}
+      <AmountField
+        label="Deposit"
+        amount={shownB}
+        onAmount={(value) => {
+          setLastEdited('B');
+          setAmountB(value);
+          setStatus(null);
+        }}
+        symbol={tokenB}
+        onSymbol={chooseB}
+        balance={balances[tokenB] ?? 0n}
+        account={account}
+        loading={kind === 'pool' && pair.loading}
+        showQuickAmounts
+      />
 
-      <div style={{ color: 'var(--text-secondary)', fontSize: '0.85rem', marginBottom: '16px', lineHeight: 1.4 }}>
-        Provide liquidity on {activeNetworkConfig.name} to earn 0.3% protocol fee on all trades.
-      </div>
-
-      {/* Input Token A */}
-      <div className="input-container" style={{ marginBottom: '4px' }}>
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
-          <span style={{ color: 'var(--text-secondary)', fontSize: '0.85rem' }}>Deposit</span>
-          {account && (
-            <div style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '0.8rem', color: 'var(--text-secondary)' }}>
-              <Wallet size={12} />
-              <span>Balance: {formatBalance(balanceA)}</span>
+      {kind === 'pool' && ratioKnown ? (
+        <div className="stat-box">
+          <div className="stat-row">
+            <span>Pool price</span>
+            <span>1 {tokenA} = {formatTokenAmount(spot ?? 0n, 6)} {tokenB}</span>
+          </div>
+          <div className="stat-row">
+            <span>Reserves</span>
+            <span>
+              {formatTokenAmount(pair.reserveA)} {underlyingSymbol(tokenA)}
+              {' · '}
+              {formatTokenAmount(pair.reserveB)} {underlyingSymbol(tokenB)}
+            </span>
+          </div>
+          {pair.lpBalance > 0n ? (
+            <div className="stat-row">
+              <span>Your share</span>
+              <span>{formatShare(pair.lpBalance, pair.totalSupply)}</span>
             </div>
-          )}
+          ) : null}
+          <div className="stat-row">
+            <span>Slippage tolerance</span>
+            <span>0.5%</span>
+          </div>
         </div>
-        <div style={{ display: 'flex', gap: '12px', alignItems: 'center' }}>
-          <input
-            type="number"
-            placeholder="0"
-            className="token-input"
-            value={amountA}
-            onChange={(e) => handleAmountAChange(e.target.value)}
-          />
-          <button className="btn btn-secondary" style={{ padding: '8px 16px', borderRadius: '12px' }}>
-            {tokenASymbol}
-          </button>
-        </div>
-      </div>
+      ) : null}
 
-      {/* Plus Icon */}
-      <div style={{ display: 'flex', justifyContent: 'center', margin: '12px 0' }}>
-        <Plus size={20} color="var(--text-secondary)" />
-      </div>
-
-      {/* Input Token B */}
-      <div className="input-container" style={{ marginBottom: '24px' }}>
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
-          <span style={{ color: 'var(--text-secondary)', fontSize: '0.85rem' }}>Deposit</span>
-          {account && (
-            <div style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '0.8rem', color: 'var(--text-secondary)' }}>
-              <Wallet size={12} />
-              <span>Balance: {formatBalance(balanceB)}</span>
-            </div>
-          )}
+      {opening != null ? (
+        <div className="stat-box">
+          <div className="stat-row">
+            <span>Starting price</span>
+            <span>1 {tokenA} = {formatTokenAmount(opening, 6)} {tokenB}</span>
+          </div>
         </div>
-        <div style={{ display: 'flex', gap: '12px', alignItems: 'center' }}>
-          <input
-            type="number"
-            placeholder="0"
-            className="token-input"
-            value={amountB}
-            onChange={(e) => setAmountB(e.target.value)}
-          />
-          <button className="btn btn-secondary" style={{ padding: '8px 16px', borderRadius: '12px' }}>
-            {tokenBSymbol}
-          </button>
-        </div>
-      </div>
+      ) : null}
 
-      {/* Action Button */}
       {!account ? (
-        <button
-          className="btn btn-primary"
-          style={{ width: '100%', padding: '16px', fontSize: '1.1rem' }}
-          onClick={connectWallet}
-        >
+        <button type="button" className="btn btn-primary btn-block" onClick={connectWallet}>
           Connect Wallet
         </button>
       ) : !isCorrectNetwork ? (
         <button
-          className="btn"
-          style={{
-            width: '100%',
-            padding: '15px',
-            fontSize: '0.98rem',
-            background: '#b91c1c',
-            color: '#ffffff',
-            fontWeight: 600,
-            borderRadius: '14px',
-          }}
+          type="button"
+          className="btn btn-danger btn-block"
           onClick={() => switchWalletToNetwork(selectedNetwork)}
         >
           Switch Wallet to {activeNetworkConfig.name}
         </button>
-      ) : !amountA || !amountB ? (
-        <button className="btn btn-secondary" style={{ width: '100%', padding: '16px', fontSize: '1.1rem' }} disabled>
-          Enter an amount
-        </button>
       ) : (
-        <button
-          className="btn btn-primary"
-          style={{ width: '100%', padding: '16px', fontSize: '1.1rem' }}
-          onClick={handleAddLiquidity}
-          disabled={isAdding || isApproving}
-        >
-          {isApproving ? 'Approving Tokens...' : isAdding ? 'Adding Liquidity...' : `Add Liquidity on ${activeNetworkConfig.shortName}`}
+        <button type="button" className="btn btn-primary btn-block" onClick={handleAdd} disabled={!action.ready}>
+          {action.label}
         </button>
       )}
     </div>
   );
+}
+
+function depositAmounts({ amountA, amountB, lastEdited, ratioKnown, reserveA, reserveB }) {
+  if (ratioKnown) {
+    if (lastEdited === 'A') {
+      const a = tryParseEther(amountA);
+      if (a == null || a === 0n) return null;
+      const b = quoteLiquidity(a, reserveA, reserveB);
+      return b ? { a, b } : null;
+    }
+    const b = tryParseEther(amountB);
+    if (b == null || b === 0n) return null;
+    const a = quoteLiquidity(b, reserveB, reserveA);
+    return a ? { a, b } : null;
+  }
+  const a = tryParseEther(amountA);
+  const b = tryParseEther(amountB);
+  if (a == null || b == null || a === 0n || b === 0n) return null;
+  return { a, b };
+}
+
+function describeAdd({ kind, pair, deposit, tokenA, tokenB, balances, balancesLoaded, phase }) {
+  if (phase) return { ready: false, label: phase };
+  if (kind === 'same') return { ready: false, label: 'Choose two different tokens' };
+  if (kind === 'wrap') return { ready: false, label: 'Pick a pool token' };
+  if (kind === 'pool' && pair.loading && !pair.exists) return { ready: false, label: 'Loading pool…' };
+  if (pair.error) return { ready: false, label: 'Network unavailable' };
+  if (!deposit) return { ready: false, label: 'Enter an amount' };
+
+  const cap = (symbol) => (symbol === 'ETH' ? maxSpendableEth(balances.ETH ?? 0n) : (balances[symbol] ?? 0n));
+  if (deposit.a > cap(tokenA)) {
+    if (tokenA === 'ETH' && deposit.a <= (balances.ETH ?? 0n)) {
+      return { ready: false, label: 'Leave a little ETH for gas' };
+    }
+    return { ready: false, label: `Insufficient ${tokenA} balance` };
+  }
+  if (deposit.b > cap(tokenB)) {
+    if (tokenB === 'ETH' && deposit.b <= (balances.ETH ?? 0n)) {
+      return { ready: false, label: 'Leave a little ETH for gas' };
+    }
+    return { ready: false, label: `Insufficient ${tokenB} balance` };
+  }
+  const paysEth = tokenA === 'ETH' || tokenB === 'ETH';
+  if (balancesLoaded && !paysEth && (balances.ETH ?? 0n) === 0n) {
+    return { ready: false, label: 'You need ETH for gas' };
+  }
+  return { ready: true, label: 'Add liquidity' };
 }

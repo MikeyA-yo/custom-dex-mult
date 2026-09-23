@@ -4,6 +4,7 @@ import Navbar from './components/Navbar';
 import SwapCard from './components/SwapCard';
 import PoolCard from './components/PoolCard';
 import ContractsInfoCard from './components/ContractsInfoCard';
+import FaucetButton from './components/FaucetButton';
 import { Web3Provider, useWeb3 } from './hooks/useWeb3';
 
 function DexContent() {
@@ -28,7 +29,7 @@ function DexContent() {
       position: 'relative',
       zIndex: 1,
     }}>
-      <div style={{ width: '100%', maxWidth: '490px' }}>
+      <div style={{ width: '100%', maxWidth: '520px' }}>
 
         {/* 1. Network Version Selector Tabs (Sepolia vs Anvil) */}
         <div className="network-tabs-wrapper">
@@ -100,6 +101,8 @@ function DexContent() {
             </button>
           </div>
         )}
+
+        <FaucetButton />
 
         {/* 3. DEX Feature Tabs (Swap / Pool / Contracts) */}
         <div style={{

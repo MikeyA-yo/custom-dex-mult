@@ -1,8 +1,32 @@
-import React, { useState, useEffect, useMemo, useRef } from 'react';
-import { ArrowDown, ArrowUpDown, Wallet, Settings, AlertCircle, Check } from 'lucide-react';
+import { useMemo, useState } from 'react';
+import { ArrowDown, ArrowUpDown, Settings } from 'lucide-react';
 import { ethers } from 'ethers';
 import { useWeb3 } from '../hooks/useWeb3';
+import { useBalances, usePair } from '../hooks/useMarket';
 import { ABIS } from '../utils/contracts';
+import { pairKind, underlyingSymbol } from '../utils/tokens';
+import { ensureAllowance } from '../utils/dexTx';
+import {
+  IMPACT_HIGH_BPS,
+  IMPACT_WARN_BPS,
+  applySlippageDown,
+  applySlippageUp,
+  deadline,
+  decodeRevert,
+  formatImpact,
+  formatTokenAmount,
+  formatTokenInput,
+  getAmountIn,
+  getAmountOut,
+  maxSpendableEth,
+  priceImpactBps,
+  spotOutPerIn,
+  tryParseEther,
+} from '../utils/dexMath';
+import AmountField from './AmountField';
+import StatusBanner from './StatusBanner';
+
+const SLIPPAGE_PRESETS = [0.1, 0.5, 1];
 
 export default function SwapCard() {
   const {
@@ -10,803 +34,491 @@ export default function SwapCard() {
     connectWallet,
     router,
     signer,
-    readProvider,
     tokens,
     isCorrectNetwork,
     selectedNetwork,
     activeNetworkConfig,
     switchWalletToNetwork,
+    bumpData,
   } = useWeb3();
 
-  // Tokens selection
-  const [tokenInSymbol, setTokenInSymbol] = useState('10X');
-  const [tokenOutSymbol, setTokenOutSymbol] = useState('AYO');
-
-  // Input states & bidirectional tracking
+  const [tokenIn, setTokenIn] = useState('10X');
+  const [tokenOut, setTokenOut] = useState('AYO');
   const [amountIn, setAmountIn] = useState('');
   const [amountOut, setAmountOut] = useState('');
-  const [lastEdited, setLastEdited] = useState('IN'); // 'IN' | 'OUT'
-  const [isQuoting, setIsQuoting] = useState(false);
-
-  // Slippage states
-  const [slippagePercent, setSlippagePercent] = useState(0.5); // default 0.5%
+  const [lastEdited, setLastEdited] = useState('IN');
+  const [slippagePercent, setSlippagePercent] = useState(0.5);
   const [customSlippageInput, setCustomSlippageInput] = useState('');
   const [showSettings, setShowSettings] = useState(false);
-
-  // User tolerable limit slot ("input max/min tolerable amount as well due to slippage")
-  const [customTolerableAmount, setCustomTolerableAmount] = useState('');
-  const [isCustomTolerableLocked, setIsCustomTolerableLocked] = useState(false);
-
-  // Rate invert display: true shows 1 tokenIn = X tokenOut, false shows 1 tokenOut = Y tokenIn
+  const [customTolerable, setCustomTolerable] = useState('');
+  const [tolerableLocked, setTolerableLocked] = useState(false);
   const [invertRate, setInvertRate] = useState(false);
+  const [phase, setPhase] = useState('');
+  const [status, setStatus] = useState(null);
 
-  // Tx states
-  const [isApproving, setIsApproving] = useState(false);
-  const [isSwapping, setIsSwapping] = useState(false);
-  const [balanceIn, setBalanceIn] = useState('0');
-  const [balanceOut, setBalanceOut] = useState('0');
-  const [isNodeOffline, setIsNodeOffline] = useState(false);
-  const [statusMessage, setStatusMessage] = useState(null);
+  const { balances, error: balanceError, loaded: balancesLoaded } = useBalances();
+  const pair = usePair(tokenIn, tokenOut);
+  const kind = pairKind(tokenIn, tokenOut);
 
-  // Reference for debouncing quote queries
-  const quoteTimerRef = useRef(null);
-
-  // Fetch balances for selected tokens
-  useEffect(() => {
-    let isMounted = true;
-    const fetchBalances = async () => {
-      if (!account || !tokens) return;
-      const targetProvider = (signer && isCorrectNetwork) ? signer : readProvider;
-      if (!targetProvider) return;
-
-      try {
-        const inAddr = tokens[tokenInSymbol];
-        const outAddr = tokens[tokenOutSymbol];
-        if (inAddr && outAddr) {
-          const tokenInContract = new ethers.Contract(inAddr, ABIS.ERC20, targetProvider);
-          const tokenOutContract = new ethers.Contract(outAddr, ABIS.ERC20, targetProvider);
-          const [bIn, bOut] = await Promise.all([
-            tokenInContract.balanceOf(account),
-            tokenOutContract.balanceOf(account),
-          ]);
-          if (isMounted) {
-            setBalanceIn(ethers.formatEther(bIn));
-            setBalanceOut(ethers.formatEther(bOut));
-            setIsNodeOffline(false);
-          }
-        }
-      } catch (err) {
-        if (isMounted) {
-          setBalanceIn('0');
-          setBalanceOut('0');
-          if (selectedNetwork === 'anvil') {
-            setIsNodeOffline(true);
-          }
-        }
-      }
-    };
-
-    fetchBalances();
-    const timer = setInterval(fetchBalances, 8000);
-    return () => {
-      isMounted = false;
-      clearInterval(timer);
-    };
-  }, [account, signer, isCorrectNetwork, readProvider, tokenInSymbol, tokenOutSymbol, tokens, selectedNetwork]);
-
-  // Two-Way Price Quote Calculation
-  useEffect(() => {
-    if (quoteTimerRef.current) clearTimeout(quoteTimerRef.current);
-
-    if (!router || !tokens) return;
-
-    const inAddr = tokens[tokenInSymbol];
-    const outAddr = tokens[tokenOutSymbol];
-    if (!inAddr || !outAddr) return;
-
-    const path = [inAddr, outAddr];
-
-    // If active input is EMPTY or 0
+  const quote = useMemo(() => {
+    const edited = lastEdited === 'IN' ? tryParseEther(amountIn) : tryParseEther(amountOut);
+    if (edited == null || edited === 0n) return null;
+    if (kind === 'wrap') return { inWei: edited, outWei: edited };
+    if (!pair.exists || pair.reserveA === 0n || pair.reserveB === 0n) return null;
     if (lastEdited === 'IN') {
-      if (!amountIn || isNaN(amountIn) || Number(amountIn) <= 0) {
-        setAmountOut('');
-        setIsQuoting(false);
-        if (!isCustomTolerableLocked) setCustomTolerableAmount('');
-        return;
-      }
-    } else {
-      if (!amountOut || isNaN(amountOut) || Number(amountOut) <= 0) {
-        setAmountIn('');
-        setIsQuoting(false);
-        if (!isCustomTolerableLocked) setCustomTolerableAmount('');
-        return;
-      }
+      const outWei = getAmountOut(edited, pair.reserveA, pair.reserveB);
+      return outWei ? { inWei: edited, outWei } : null;
     }
+    const inWei = getAmountIn(edited, pair.reserveA, pair.reserveB);
+    return inWei ? { inWei, outWei: edited } : null;
+  }, [amountIn, amountOut, lastEdited, kind, pair.exists, pair.reserveA, pair.reserveB]);
 
-    setIsQuoting(true);
+  const shownIn = lastEdited === 'IN' ? amountIn : (quote ? formatTokenInput(quote.inWei) : '');
+  const shownOut = lastEdited === 'OUT' ? amountOut : (quote ? formatTokenInput(quote.outWei) : '');
 
-    quoteTimerRef.current = setTimeout(async () => {
-      try {
-        if (lastEdited === 'IN') {
-          // Calculate expected amountOut from given amountIn
-          const parsedIn = ethers.parseEther(amountIn);
-          const amounts = await router.getAmountsOut(parsedIn, path);
-          const outEther = ethers.formatEther(amounts[1]);
-          setAmountOut(outEther);
+  const autoMinOut = quote ? applySlippageDown(quote.outWei, slippagePercent) : 0n;
+  const autoMaxIn = quote ? applySlippageUp(quote.inWei, slippagePercent) : 0n;
+  const customWei = tolerableLocked ? tryParseEther(customTolerable) : null;
+  const minOutWei = kind === 'wrap' ? (quote?.outWei ?? 0n) : (tolerableLocked ? customWei : autoMinOut);
+  const maxInWei = kind === 'wrap' ? (quote?.inWei ?? 0n) : (tolerableLocked ? customWei : autoMaxIn);
 
-          // Update tolerable slot automatically if user hasn't typed a custom override
-          if (!isCustomTolerableLocked) {
-            const minTolerable = (parseFloat(outEther) * (1 - slippagePercent / 100)).toFixed(6);
-            setCustomTolerableAmount(minTolerable);
-          }
-        } else {
-          // Calculate required amountIn from requested amountOut
-          const parsedOut = ethers.parseEther(amountOut);
-          const amounts = await router.getAmountsIn(parsedOut, path);
-          const inEther = ethers.formatEther(amounts[0]);
-          setAmountIn(inEther);
+  const impact = quote && kind === 'pool'
+    ? priceImpactBps(quote.inWei, quote.outWei, pair.reserveA, pair.reserveB)
+    : null;
+  const spot = kind === 'pool' ? spotOutPerIn(pair.reserveA, pair.reserveB) : (kind === 'wrap' ? 10n ** 18n : null);
+  const execution = quote && quote.inWei > 0n ? (quote.outWei * 10n ** 18n) / quote.inWei : null;
+  const rateValue = execution == null
+    ? null
+    : (invertRate ? (quote.inWei * 10n ** 18n) / quote.outWei : execution);
 
-          // Update tolerable slot automatically if user hasn't typed a custom override
-          if (!isCustomTolerableLocked) {
-            const maxTolerable = (parseFloat(inEther) * (1 + slippagePercent / 100)).toFixed(6);
-            setCustomTolerableAmount(maxTolerable);
-          }
-        }
-        setIsNodeOffline(false);
-      } catch (err) {
-        console.warn("Quote calculation error:", err);
-        if (lastEdited === 'IN') {
-          setAmountOut('');
-        } else {
-          setAmountIn('');
-        }
-        if (selectedNetwork === 'anvil') {
-          setIsNodeOffline(true);
-        }
-      } finally {
-        setIsQuoting(false);
-      }
-    }, 300);
+  const balanceIn = balances[tokenIn] ?? 0n;
+  const spendCap = tokenIn === 'ETH' ? maxSpendableEth(balanceIn) : balanceIn;
+  const spendIn = lastEdited === 'IN' ? (quote?.inWei ?? 0n) : (maxInWei ?? 0n);
 
-    return () => {
-      if (quoteTimerRef.current) clearTimeout(quoteTimerRef.current);
-    };
-  }, [amountIn, amountOut, lastEdited, tokenInSymbol, tokenOutSymbol, router, tokens, slippagePercent, isCustomTolerableLocked, selectedNetwork]);
-
-  // Handle Input Changes
-  const handleAmountInChange = (e) => {
-    const val = e.target.value;
-    setLastEdited('IN');
-    setAmountIn(val);
-    if (!isCustomTolerableLocked) {
-      setCustomTolerableAmount('');
-    }
+  const chooseIn = (symbol) => {
+    if (symbol === tokenOut) setTokenOut(tokenIn);
+    setTokenIn(symbol);
+    setTolerableLocked(false);
+    setStatus(null);
   };
 
-  const handleAmountOutChange = (e) => {
-    const val = e.target.value;
-    setLastEdited('OUT');
-    setAmountOut(val);
-    if (!isCustomTolerableLocked) {
-      setCustomTolerableAmount('');
-    }
+  const chooseOut = (symbol) => {
+    if (symbol === tokenIn) setTokenIn(tokenOut);
+    setTokenOut(symbol);
+    setTolerableLocked(false);
+    setStatus(null);
   };
 
-  // Switch Tokens (Flip)
   const switchTokens = () => {
-    setTokenInSymbol(tokenOutSymbol);
-    setTokenOutSymbol(tokenInSymbol);
-    setInvertRate(!invertRate);
-    setIsCustomTolerableLocked(false);
-
-    // If we were editing IN, keep the amount and re-quote as IN
-    if (lastEdited === 'IN' && amountIn) {
-      // Invert fields
-      setAmountOut('');
-    } else if (amountOut) {
-      setAmountIn('');
-    }
+    const nextPay = lastEdited === 'OUT'
+      ? amountOut
+      : (quote ? ethers.formatEther(quote.outWei) : '');
+    setTokenIn(tokenOut);
+    setTokenOut(tokenIn);
+    setLastEdited('IN');
+    setAmountIn(nextPay);
+    setAmountOut('');
+    setTolerableLocked(false);
+    setStatus(null);
   };
 
-  // Quick balance buttons
-  const handleMax = () => {
-    if (balanceIn && Number(balanceIn) > 0) {
-      setLastEdited('IN');
-      setAmountIn(balanceIn);
-      setIsCustomTolerableLocked(false);
-    }
-  };
-
-  const handleHalf = () => {
-    if (balanceIn && Number(balanceIn) > 0) {
-      const half = (parseFloat(balanceIn) / 2).toString();
-      setLastEdited('IN');
-      setAmountIn(half);
-      setIsCustomTolerableLocked(false);
-    }
-  };
-
-  // Slippage change handler
-  const handleSlippagePreset = (percent) => {
+  const onSlippagePreset = (percent) => {
     setSlippagePercent(percent);
     setCustomSlippageInput('');
-    setIsCustomTolerableLocked(false);
-    // Recalculate tolerable slot
-    if (lastEdited === 'IN' && amountOut) {
-      const minTol = (parseFloat(amountOut) * (1 - percent / 100)).toFixed(6);
-      setCustomTolerableAmount(minTol);
-    } else if (lastEdited === 'OUT' && amountIn) {
-      const maxTol = (parseFloat(amountIn) * (1 + percent / 100)).toFixed(6);
-      setCustomTolerableAmount(maxTol);
-    }
+    setTolerableLocked(false);
   };
 
-  const handleCustomSlippageChange = (e) => {
-    const val = e.target.value;
-    setCustomSlippageInput(val);
-    const num = parseFloat(val);
-    if (!isNaN(num) && num > 0 && num <= 50) {
+  const onCustomSlippage = (value) => {
+    setCustomSlippageInput(value);
+    const num = Number(value);
+    if (value !== '' && Number.isFinite(num) && num >= 0 && num <= 50) {
       setSlippagePercent(num);
-      setIsCustomTolerableLocked(false);
-      if (lastEdited === 'IN' && amountOut) {
-        setCustomTolerableAmount((parseFloat(amountOut) * (1 - num / 100)).toFixed(6));
-      } else if (lastEdited === 'OUT' && amountIn) {
-        setCustomTolerableAmount((parseFloat(amountIn) * (1 + num / 100)).toFixed(6));
-      }
+      setTolerableLocked(false);
     }
   };
 
-  // Tolerable slot user override
-  const handleTolerableAmountChange = (e) => {
-    const val = e.target.value;
-    setCustomTolerableAmount(val);
-    setIsCustomTolerableLocked(true);
-  };
+  const typedAmount = tryParseEther(lastEdited === 'IN' ? amountIn : amountOut);
+  const action = describeSwap({
+    kind,
+    pair,
+    quote,
+    lastEdited,
+    tokenIn,
+    tokenOut,
+    spendIn,
+    spendCap,
+    balanceIn,
+    balancesLoaded,
+    ethBalance: balances.ETH ?? 0n,
+    impact,
+    tolerableLocked,
+    customWei,
+    minOutWei,
+    maxInWei,
+    phase,
+    typedAmount,
+  });
 
-  const handleResetTolerable = () => {
-    setIsCustomTolerableLocked(false);
-    if (lastEdited === 'IN' && amountOut) {
-      setCustomTolerableAmount((parseFloat(amountOut) * (1 - slippagePercent / 100)).toFixed(6));
-    } else if (lastEdited === 'OUT' && amountIn) {
-      setCustomTolerableAmount((parseFloat(amountIn) * (1 + slippagePercent / 100)).toFixed(6));
-    } else {
-      setCustomTolerableAmount('');
-    }
-  };
-
-  // Calculated exchange rate
-  const exchangeRate = useMemo(() => {
-    const inVal = parseFloat(amountIn);
-    const outVal = parseFloat(amountOut);
-    if (!inVal || !outVal || inVal <= 0 || outVal <= 0) return null;
-    if (invertRate) {
-      return (inVal / outVal).toFixed(6);
-    }
-    return (outVal / inVal).toFixed(6);
-  }, [amountIn, amountOut, invertRate]);
-
-  // Execute Swap: Bidirectional (Exact In vs Exact Out)
   const handleSwap = async () => {
-    if (!router || !signer || !tokens) return;
-    setStatusMessage(null);
+    if (!action.ready || !signer || !tokens || !quote) return;
+    setStatus(null);
+    const path = [
+      tokenIn === 'ETH' ? tokens.WETH : tokens[tokenIn],
+      tokenOut === 'ETH' ? tokens.WETH : tokens[tokenOut],
+    ];
+    const ttl = deadline(20);
 
     try {
-      setIsSwapping(true);
-      const inAddr = tokens[tokenInSymbol];
-      const outAddr = tokens[tokenOutSymbol];
-      const path = [inAddr, outAddr];
-      const deadline = Math.floor(Date.now() / 1000) + 60 * 20; // 20 mins
-      const routerAddress = await router.getAddress();
-      const tokenInContract = new ethers.Contract(inAddr, ABIS.ERC20, signer);
-
-      if (lastEdited === 'IN') {
-        // MODE 1: SWAP EXACT TOKENS FOR TOKENS
-        const parsedAmountIn = ethers.parseEther(amountIn);
-
-        // Determine minimum tolerable output
-        let minOutWei;
-        if (isCustomTolerableLocked && customTolerableAmount && Number(customTolerableAmount) > 0) {
-          minOutWei = ethers.parseEther(customTolerableAmount);
-        } else {
-          // Use slippage percentage
-          const parsedOut = ethers.parseEther(amountOut);
-          const factorBps = BigInt(Math.max(0, Math.floor((100 - slippagePercent) * 100)));
-          minOutWei = (parsedOut * factorBps) / 10000n;
-        }
-
-        // 1. Check & execute allowance
-        setIsApproving(true);
-        const allowance = await tokenInContract.allowance(account, routerAddress);
-        if (allowance < parsedAmountIn) {
-          const txApprove = await tokenInContract.approve(routerAddress, ethers.MaxUint256);
-          await txApprove.wait();
-        }
-        setIsApproving(false);
-
-        // 2. Execute swapExactTokensForTokens
-        const tx = await router.swapExactTokensForTokens(
-          parsedAmountIn,
-          minOutWei,
-          path,
-          account,
-          deadline
-        );
+      if (kind === 'wrap') {
+        setPhase(tokenIn === 'ETH' ? 'Wrapping ETH…' : 'Unwrapping WETH…');
+        const weth = new ethers.Contract(tokens.WETH, ABIS.WETH, signer);
+        const tx = tokenIn === 'ETH'
+          ? await weth.deposit({ value: quote.inWei })
+          : await weth.withdraw(quote.inWei);
         await tx.wait();
-        setStatusMessage({ type: 'success', text: `Swapped ${amountIn} ${tokenInSymbol} for ${tokenOutSymbol} successfully!` });
+      } else if (!router) {
+        throw new Error('Router is not available on this network.');
       } else {
-        // MODE 2: SWAP TOKENS FOR EXACT TOKENS
-        const parsedAmountOut = ethers.parseEther(amountOut);
+        const routerAddress = await router.getAddress();
+        if (tokenIn !== 'ETH') {
+          setPhase(`Approving ${tokenIn}…`);
+          const allowanceAmount = lastEdited === 'IN' ? quote.inWei : maxInWei;
+          await ensureAllowance({
+            tokenAddress: tokens[tokenIn],
+            owner: account,
+            spender: routerAddress,
+            amount: allowanceAmount,
+            signer,
+          });
+        }
 
-        // Determine maximum tolerable input
-        let maxInWei;
-        if (isCustomTolerableLocked && customTolerableAmount && Number(customTolerableAmount) > 0) {
-          maxInWei = ethers.parseEther(customTolerableAmount);
+        setPhase('Swapping…');
+        let tx;
+        if (tokenIn === 'ETH' && lastEdited === 'IN') {
+          tx = await router.swapExactETHForTokens(minOutWei, path, account, ttl, { value: quote.inWei });
+        } else if (tokenIn === 'ETH') {
+          tx = await router.swapETHForExactTokens(quote.outWei, path, account, ttl, { value: maxInWei });
+        } else if (tokenOut === 'ETH' && lastEdited === 'IN') {
+          tx = await router.swapExactTokensForETH(quote.inWei, minOutWei, path, account, ttl);
+        } else if (tokenOut === 'ETH') {
+          tx = await router.swapTokensForExactETH(quote.outWei, maxInWei, path, account, ttl);
+        } else if (lastEdited === 'IN') {
+          tx = await router.swapExactTokensForTokens(quote.inWei, minOutWei, path, account, ttl);
         } else {
-          // Use slippage percentage
-          const parsedIn = ethers.parseEther(amountIn);
-          const factorBps = BigInt(Math.floor((100 + slippagePercent) * 100));
-          maxInWei = (parsedIn * factorBps) / 10000n;
+          tx = await router.swapTokensForExactTokens(quote.outWei, maxInWei, path, account, ttl);
         }
-
-        // 1. Check & execute allowance for maximum tolerable amount
-        setIsApproving(true);
-        const allowance = await tokenInContract.allowance(account, routerAddress);
-        if (allowance < maxInWei) {
-          const txApprove = await tokenInContract.approve(routerAddress, ethers.MaxUint256);
-          await txApprove.wait();
-        }
-        setIsApproving(false);
-
-        // 2. Execute swapTokensForExactTokens
-        const tx = await router.swapTokensForExactTokens(
-          parsedAmountOut,
-          maxInWei,
-          path,
-          account,
-          deadline
-        );
         await tx.wait();
-        setStatusMessage({ type: 'success', text: `Received exactly ${amountOut} ${tokenOutSymbol} successfully!` });
       }
 
-      // Reset form
+      setStatus({
+        type: 'success',
+        text: kind === 'wrap'
+          ? (tokenIn === 'ETH' ? 'Wrapped ETH into WETH.' : 'Unwrapped WETH into ETH.')
+          : `Swapped ${tokenIn} for ${tokenOut}.`,
+      });
       setAmountIn('');
       setAmountOut('');
-      setCustomTolerableAmount('');
-      setIsCustomTolerableLocked(false);
+      setCustomTolerable('');
+      setTolerableLocked(false);
+      bumpData();
     } catch (err) {
-      console.error("Swap error:", err);
-      const errMsg = err?.reason || err?.message || 'Transaction failed';
-      setStatusMessage({ type: 'error', text: errMsg });
+      setStatus({ type: 'error', text: decodeRevert(err) });
     } finally {
-      setIsApproving(false);
-      setIsSwapping(false);
+      setPhase('');
     }
   };
 
-  const formatBalance = (val) => {
-    if (!val || isNaN(val)) return '0.00';
-    const num = parseFloat(val);
-    if (num === 0) return '0.00';
-    if (num < 0.0001) return '< 0.0001';
-    return num.toLocaleString(undefined, { maximumFractionDigits: 4 });
-  };
+  const poolName = `${underlyingSymbol(tokenIn)} / ${underlyingSymbol(tokenOut)}`;
+  const rateBase = invertRate ? tokenOut : tokenIn;
+  const rateQuote = invertRate ? tokenIn : tokenOut;
+  const feeWei = quote ? (quote.inWei * 3n) / 1000n : 0n;
+  const tolerableDisplay = lastEdited === 'IN'
+    ? formatTokenAmount(minOutWei ?? 0n, 8)
+    : formatTokenAmount(maxInWei ?? 0n, 8);
 
   return (
-    <div className="glass-panel" style={{ padding: '22px' }}>
-      {/* Header */}
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-          <h2 style={{ margin: 0, fontSize: '1.25rem', fontWeight: 600 }}>Swap</h2>
-        </div>
-
-        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-          <span style={{
-            fontSize: '0.78rem',
-            color: 'var(--text-secondary)',
-            background: '#0d111a',
-            border: '1px solid #1c2433',
-            padding: '4px 10px',
-            borderRadius: '10px',
-            fontWeight: 500,
-          }}>
-            {activeNetworkConfig.shortName}
-          </span>
-
+    <div className="glass-panel dex-card">
+      <div className="card-head">
+        <h2>Swap</h2>
+        <div className="card-head-actions">
+          <span className="network-pill">{activeNetworkConfig.shortName}</span>
           <button
-            onClick={() => setShowSettings(!showSettings)}
+            type="button"
             className="btn-icon"
-            style={{
-              color: showSettings ? 'var(--text-primary)' : 'var(--text-secondary)',
-              background: showSettings ? '#19202e' : 'transparent',
-            }}
-            title="Swap Settings"
+            aria-label="Swap settings"
+            onClick={() => setShowSettings((open) => !open)}
           >
             <Settings size={17} />
           </button>
         </div>
       </div>
 
-      {/* Slippage & Slippage Tolerable Controls */}
-      {showSettings && (
-        <div style={{
-          background: '#0c0f16',
-          border: '1px solid #1a2232',
-          borderRadius: '14px',
-          padding: '14px',
-          marginBottom: '16px',
-        }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '10px' }}>
-            <span style={{ fontSize: '0.85rem', fontWeight: 500, color: 'var(--text-primary)' }}>
-              Slippage Tolerance
-            </span>
-            <span style={{ fontSize: '0.8rem', color: '#60a5fa', fontWeight: 600 }}>
-              {slippagePercent}%
-            </span>
+      {showSettings && kind === 'pool' ? (
+        <div className="settings-panel">
+          <div className="settings-row">
+            <span>Slippage tolerance</span>
+            <strong>{slippagePercent}%</strong>
           </div>
-
-          <div style={{ display: 'flex', gap: '8px', marginBottom: '12px' }}>
-            {[0.1, 0.5, 1.0].map((preset) => (
+          <div className="slippage-row">
+            {SLIPPAGE_PRESETS.map((preset) => (
               <button
+                type="button"
                 key={preset}
-                onClick={() => handleSlippagePreset(preset)}
-                className={`slippage-btn ${slippagePercent === preset && !customSlippageInput ? 'active' : ''}`}
-                style={{ flex: 1 }}
+                className={`slippage-btn ${slippagePercent === preset && customSlippageInput === '' ? 'active' : ''}`}
+                onClick={() => onSlippagePreset(preset)}
               >
                 {preset}%
               </button>
             ))}
-            <div style={{ flex: 1.2, position: 'relative' }}>
+            <div className="slippage-custom">
               <input
-                type="number"
+                type="text"
+                inputMode="decimal"
                 placeholder="Custom"
                 value={customSlippageInput}
-                onChange={handleCustomSlippageChange}
-                style={{
-                  width: '100%',
-                  background: '#141923',
-                  border: customSlippageInput ? '1px solid var(--accent-border)' : '1px solid #212a3b',
-                  borderRadius: '8px',
-                  padding: '4px 18px 4px 8px',
-                  color: 'var(--text-primary)',
-                  fontSize: '0.8rem',
-                  outline: 'none',
-                  textAlign: 'right',
-                }}
+                onChange={(event) => onCustomSlippage(event.target.value.replace(/[^\d.]/g, ''))}
               />
-              <span style={{ position: 'absolute', right: '6px', top: '5px', fontSize: '0.75rem', color: 'var(--text-muted)' }}>%</span>
+              <span>%</span>
             </div>
           </div>
-
-          {/* User Requested: Slot to input max/min tolerable amount directly due to slippage */}
-          <div style={{
-            borderTop: '1px solid #171d2b',
-            paddingTop: '10px',
-            marginTop: '10px',
-          }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '6px' }}>
-              <span style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>
-                {lastEdited === 'IN' ? 'Min Tolerable Output' : 'Max Tolerable Input'}
-              </span>
-              {isCustomTolerableLocked ? (
-                <button
-                  onClick={handleResetTolerable}
-                  style={{
-                    background: 'none',
-                    border: 'none',
-                    color: '#60a5fa',
-                    fontSize: '0.75rem',
-                    cursor: 'pointer',
-                    padding: 0,
-                  }}
-                >
-                  Reset to Auto
+          <div className="settings-split">
+            <div className="settings-row">
+              <span>{lastEdited === 'IN' ? 'Minimum received' : 'Maximum paid'}</span>
+              {tolerableLocked ? (
+                <button type="button" className="text-button" onClick={() => setTolerableLocked(false)}>
+                  Reset to auto
                 </button>
               ) : (
-                <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>Auto-calculated</span>
+                <span className="muted">Auto</span>
               )}
             </div>
-
-            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+            <div className="tolerable-row">
               <input
-                type="number"
-                placeholder={lastEdited === 'IN' ? 'Min tokens to receive' : 'Max tokens to pay'}
-                value={customTolerableAmount}
-                onChange={handleTolerableAmountChange}
-                style={{
-                  flex: 1,
-                  background: '#141923',
-                  border: isCustomTolerableLocked ? '1px solid #3b82f6' : '1px solid #212a3b',
-                  borderRadius: '8px',
-                  padding: '6px 10px',
-                  color: 'var(--text-primary)',
-                  fontSize: '0.85rem',
-                  outline: 'none',
-                  fontVariantNumeric: 'tabular-nums',
+                type="text"
+                inputMode="decimal"
+                value={tolerableLocked ? customTolerable : (quote ? formatTokenInput(lastEdited === 'IN' ? autoMinOut : autoMaxIn) : '')}
+                onChange={(event) => {
+                  setCustomTolerable(event.target.value.replace(/[^\d.]/g, ''));
+                  setTolerableLocked(true);
                 }}
               />
-              <span style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', fontWeight: 600 }}>
-                {lastEdited === 'IN' ? tokenOutSymbol : tokenInSymbol}
-              </span>
+              <strong>{lastEdited === 'IN' ? tokenOut : tokenIn}</strong>
             </div>
           </div>
         </div>
-      )}
+      ) : null}
 
-      {/* Offline Alert */}
-      {isNodeOffline && selectedNetwork === 'anvil' && (
-        <div style={{
-          display: 'flex',
-          alignItems: 'center',
-          gap: '8px',
-          padding: '10px 14px',
-          borderRadius: '12px',
-          background: 'var(--warning-subtle)',
-          border: '1px solid rgba(245, 158, 11, 0.3)',
-          color: '#fbbf24',
-          fontSize: '0.85rem',
-          marginBottom: '16px',
-        }}>
-          <AlertCircle size={16} />
-          <span>Local node not running at 127.0.0.1:8545. Switch to Sepolia tab above.</span>
-        </div>
-      )}
+      {balanceError || pair.error ? (
+        <StatusBanner type="warning">{balanceError || pair.error}</StatusBanner>
+      ) : null}
+      {status ? <StatusBanner type={status.type}>{status.text}</StatusBanner> : null}
 
-      {/* Status Message Notification */}
-      {statusMessage && (
-        <div style={{
-          display: 'flex',
-          alignItems: 'center',
-          gap: '8px',
-          padding: '10px 14px',
-          borderRadius: '12px',
-          background: statusMessage.type === 'success' ? 'var(--success-subtle)' : 'var(--error-subtle)',
-          border: statusMessage.type === 'success' ? '1px solid rgba(16, 185, 129, 0.3)' : '1px solid rgba(239, 68, 68, 0.3)',
-          color: statusMessage.type === 'success' ? '#34d399' : '#fca5a5',
-          fontSize: '0.85rem',
-          marginBottom: '16px',
-        }}>
-          {statusMessage.type === 'success' ? <Check size={16} /> : <AlertCircle size={16} />}
-          <span style={{ flex: 1, wordBreak: 'break-word' }}>{statusMessage.text}</span>
-        </div>
-      )}
+      <AmountField
+        label="You pay"
+        amount={shownIn}
+        onAmount={(value) => {
+          setLastEdited('IN');
+          setAmountIn(value);
+          setTolerableLocked(false);
+          setStatus(null);
+        }}
+        symbol={tokenIn}
+        onSymbol={chooseIn}
+        balance={balanceIn}
+        account={account}
+        loading={kind === 'pool' && pair.loading}
+        showQuickAmounts
+      />
 
-      {/* Input 1: "You pay" */}
-      <div className="input-container" style={{ marginBottom: '4px' }}>
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
-          <span style={{ color: 'var(--text-secondary)', fontSize: '0.82rem', fontWeight: 500 }}>You pay</span>
-          {account && (
-            <div style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '0.8rem', color: 'var(--text-secondary)' }}>
-              <Wallet size={12} />
-              <span>Balance: {formatBalance(balanceIn)}</span>
-              <button
-                onClick={handleHalf}
-                style={{
-                  background: '#161d2a',
-                  border: '1px solid #232d3f',
-                  borderRadius: '6px',
-                  color: 'var(--text-secondary)',
-                  fontSize: '0.72rem',
-                  fontWeight: 600,
-                  padding: '2px 6px',
-                  cursor: 'pointer',
-                }}
-              >
-                50%
-              </button>
-              <button
-                onClick={handleMax}
-                style={{
-                  background: 'var(--accent-subtle)',
-                  border: '1px solid var(--accent-border)',
-                  borderRadius: '6px',
-                  color: '#60a5fa',
-                  fontSize: '0.72rem',
-                  fontWeight: 600,
-                  padding: '2px 6px',
-                  cursor: 'pointer',
-                }}
-              >
-                MAX
-              </button>
-            </div>
-          )}
-        </div>
-
-        <div style={{ display: 'flex', gap: '12px', alignItems: 'center' }}>
-          <input
-            type="number"
-            placeholder="0"
-            className="token-input"
-            value={amountIn}
-            onChange={handleAmountInChange}
-          />
-          <div className="token-badge">
-            <span>{tokenInSymbol}</span>
-          </div>
-        </div>
-      </div>
-
-      {/* Center Flip Arrow */}
-      <div style={{ display: 'flex', justifyContent: 'center', margin: '-11px 0', position: 'relative', zIndex: 2 }}>
-        <button
-          onClick={switchTokens}
-          style={{
-            background: '#121620',
-            padding: '7px',
-            borderRadius: '10px',
-            border: '1px solid #202737',
-            cursor: 'pointer',
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            color: 'var(--text-secondary)',
-            transition: 'transform 0.2s ease, border-color 0.15s',
-          }}
-          onMouseOver={(e) => {
-            e.currentTarget.style.transform = 'rotate(180deg)';
-            e.currentTarget.style.borderColor = '#3b82f6';
-          }}
-          onMouseOut={(e) => {
-            e.currentTarget.style.transform = 'rotate(0deg)';
-            e.currentTarget.style.borderColor = '#202737';
-          }}
-          title="Switch Tokens"
-        >
+      <div className="flip-row">
+        <button type="button" className="flip-btn" onClick={switchTokens} aria-label="Switch tokens">
           <ArrowDown size={15} />
         </button>
       </div>
 
-      {/* Input 2: "You receive" (Bidirectional - completely editable!) */}
-      <div className="input-container" style={{ marginTop: '4px', marginBottom: '14px' }}>
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-            <span style={{ color: 'var(--text-secondary)', fontSize: '0.82rem', fontWeight: 500 }}>You receive</span>
-            {isQuoting && (
-              <span style={{ fontSize: '0.75rem', color: '#60a5fa' }}>fetching best price...</span>
-            )}
-          </div>
-          {account && (
-            <div style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '0.8rem', color: 'var(--text-secondary)' }}>
-              <Wallet size={12} />
-              <span>Balance: {formatBalance(balanceOut)}</span>
-            </div>
-          )}
-        </div>
+      <AmountField
+        label="You receive"
+        amount={shownOut}
+        onAmount={(value) => {
+          setLastEdited('OUT');
+          setAmountOut(value);
+          setTolerableLocked(false);
+          setStatus(null);
+        }}
+        symbol={tokenOut}
+        onSymbol={chooseOut}
+        balance={balances[tokenOut] ?? 0n}
+        account={account}
+        loading={kind === 'pool' && pair.loading}
+      />
 
-        <div style={{ display: 'flex', gap: '12px', alignItems: 'center' }}>
-          <input
-            type="number"
-            placeholder="0"
-            className="token-input"
-            value={amountOut}
-            onChange={handleAmountOutChange}
-          />
-          <div className="token-badge">
-            <span>{tokenOutSymbol}</span>
-          </div>
-        </div>
-      </div>
-
-      {/* Live Exchange Rate & Execution Mode Pill */}
-      {exchangeRate && (
-        <div style={{
-          display: 'flex',
-          justifyContent: 'space-between',
-          alignItems: 'center',
-          marginBottom: '14px',
-          padding: '0 4px',
-        }}>
-          <div
-            className="rate-pill"
-            onClick={() => setInvertRate(!invertRate)}
-            title="Click to invert exchange rate"
-          >
+      {rateValue != null ? (
+        <div className="rate-row">
+          <button type="button" className="rate-pill" onClick={() => setInvertRate((value) => !value)}>
             <span>
-              1 {invertRate ? tokenOutSymbol : tokenInSymbol} ≈ {exchangeRate} {invertRate ? tokenInSymbol : tokenOutSymbol}
+              1 {rateBase} ≈ {formatTokenAmount(rateValue, 6)} {rateQuote}
             </span>
-            <ArrowUpDown size={12} color="var(--text-muted)" />
-          </div>
-
-          <span style={{
-            fontSize: '0.75rem',
-            color: lastEdited === 'IN' ? '#34d399' : '#60a5fa',
-            background: lastEdited === 'IN' ? 'rgba(16, 185, 129, 0.1)' : 'rgba(59, 130, 246, 0.1)',
-            padding: '3px 8px',
-            borderRadius: '6px',
-            fontWeight: 500,
-          }}>
-            {lastEdited === 'IN' ? 'Exact Pay' : 'Exact Receive'}
+            <ArrowUpDown size={12} />
+          </button>
+          <span className={`mode-pill ${lastEdited === 'IN' ? 'mode-exact-in' : 'mode-exact-out'}`}>
+            {kind === 'wrap' ? 'Wrap' : lastEdited === 'IN' ? 'Exact pay' : 'Exact receive'}
           </span>
         </div>
-      )}
+      ) : null}
 
-      {/* Trade Breakdown Summary Box */}
-      {(amountIn && amountOut && Number(amountIn) > 0 && Number(amountOut) > 0) && (
-        <div style={{
-          background: '#0a0d14',
-          border: '1px solid #171d2b',
-          borderRadius: '12px',
-          padding: '12px 14px',
-          marginBottom: '16px',
-          fontSize: '0.8rem',
-          display: 'flex',
-          flexDirection: 'column',
-          gap: '8px',
-        }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', color: 'var(--text-secondary)' }}>
-            <span>{lastEdited === 'IN' ? 'Min. Output Received' : 'Max. Input Required'}</span>
-            <span style={{ color: 'var(--text-primary)', fontWeight: 600 }}>
-              {customTolerableAmount ? `${customTolerableAmount} ${lastEdited === 'IN' ? tokenOutSymbol : tokenInSymbol}` : '—'}
+      {quote && kind === 'pool' ? (
+        <div className="stat-box">
+          <div className="stat-row">
+            <span>Pool price</span>
+            <span>{spot ? `1 ${tokenIn} = ${formatTokenAmount(spot, 6)} ${tokenOut}` : '—'}</span>
+          </div>
+          <div className="stat-row">
+            <span>Price impact</span>
+            <span className={impactClass(impact)}>{formatImpact(impact)}</span>
+          </div>
+          <div className="stat-row">
+            <span>Reserves</span>
+            <span>
+              {formatTokenAmount(pair.reserveA)} {underlyingSymbol(tokenIn)}
+              {' · '}
+              {formatTokenAmount(pair.reserveB)} {underlyingSymbol(tokenOut)}
             </span>
           </div>
-
-          <div style={{ display: 'flex', justifyContent: 'space-between', color: 'var(--text-secondary)' }}>
-            <span>Slippage Tolerance</span>
-            <span style={{ color: 'var(--text-primary)' }}>{slippagePercent}%</span>
-          </div>
-
-          <div style={{ display: 'flex', justifyContent: 'space-between', color: 'var(--text-secondary)' }}>
-            <span>Liquidity Provider Fee (0.3%)</span>
-            <span style={{ color: 'var(--text-primary)' }}>
-              {(parseFloat(amountIn) * 0.003).toFixed(5)} {tokenInSymbol}
+          <div className="stat-row">
+            <span>{lastEdited === 'IN' ? 'Minimum received' : 'Maximum paid'}</span>
+            <span>
+              {tolerableDisplay} {lastEdited === 'IN' ? tokenOut : tokenIn}
             </span>
           </div>
-
-          <div style={{ display: 'flex', justifyContent: 'space-between', color: 'var(--text-secondary)' }}>
-            <span>Routing</span>
-            <span style={{ color: '#60a5fa' }}>
-              {tokenInSymbol} &rarr; {tokenOutSymbol} (10x Router)
-            </span>
+          <div className="stat-row">
+            <span>Liquidity provider fee (0.3%)</span>
+            <span>{formatTokenAmount(feeWei, 6)} {tokenIn}</span>
+          </div>
+          <div className="stat-row">
+            <span>Route</span>
+            <span className="accent-text">{tokenIn} → {tokenOut} · {poolName}</span>
           </div>
         </div>
-      )}
+      ) : null}
 
-      {/* Action Button */}
-      {!account ? (
-        <button
-          className="btn btn-primary"
-          style={{ width: '100%', padding: '15px', fontSize: '1.05rem' }}
-          onClick={connectWallet}
-        >
-          Connect Wallet
-        </button>
-      ) : !isCorrectNetwork ? (
-        <button
-          className="btn"
-          style={{
-            width: '100%',
-            padding: '15px',
-            fontSize: '0.98rem',
-            background: '#b91c1c',
-            color: '#ffffff',
-            fontWeight: 600,
-            borderRadius: '14px',
-          }}
-          onClick={() => switchWalletToNetwork(selectedNetwork)}
-        >
-          Switch Wallet to {activeNetworkConfig.name}
-        </button>
-      ) : (!amountIn || Number(amountIn) <= 0) && (!amountOut || Number(amountOut) <= 0) ? (
-        <button className="btn btn-secondary" style={{ width: '100%', padding: '15px', fontSize: '1rem' }} disabled>
-          Enter an amount
-        </button>
-      ) : (
-        <button
-          className="btn btn-primary"
-          style={{ width: '100%', padding: '15px', fontSize: '1.05rem' }}
-          onClick={handleSwap}
-          disabled={isSwapping || isApproving || isQuoting || !amountOut || !amountIn}
-        >
-          {isApproving
-            ? 'Approving Router...'
-            : isSwapping
-            ? 'Executing Swap...'
-            : isQuoting
-            ? 'Calculating...'
-            : `Swap ${tokenInSymbol} for ${tokenOutSymbol}`}
-        </button>
-      )}
+      {quote && kind === 'wrap' ? (
+        <StatusBanner type="info">
+          {tokenIn === 'ETH'
+            ? 'This wraps ETH into WETH at 1:1. It does not trade through a pool.'
+            : 'This unwraps WETH back into ETH at 1:1. It does not trade through a pool.'}
+        </StatusBanner>
+      ) : null}
+
+      {impact != null && impact >= IMPACT_WARN_BPS ? (
+        <StatusBanner type="warning">
+          Price impact is {formatImpact(impact)}. The {poolName} pool is thin relative to this trade.
+        </StatusBanner>
+      ) : null}
+
+      <SwapButton
+        account={account}
+        isCorrectNetwork={isCorrectNetwork}
+        networkName={activeNetworkConfig.name}
+        onConnect={connectWallet}
+        onSwitch={() => switchWalletToNetwork(selectedNetwork)}
+        action={action}
+        onSwap={handleSwap}
+      />
     </div>
   );
+}
+
+function SwapButton({ account, isCorrectNetwork, networkName, onConnect, onSwitch, action, onSwap }) {
+  if (!account) {
+    return (
+      <button type="button" className="btn btn-primary btn-block" onClick={onConnect}>
+        Connect Wallet
+      </button>
+    );
+  }
+  if (!isCorrectNetwork) {
+    return (
+      <button type="button" className="btn btn-danger btn-block" onClick={onSwitch}>
+        Switch Wallet to {networkName}
+      </button>
+    );
+  }
+  return (
+    <button type="button" className="btn btn-primary btn-block" onClick={onSwap} disabled={!action.ready}>
+      {action.label}
+    </button>
+  );
+}
+
+function describeSwap({
+  kind,
+  pair,
+  quote,
+  lastEdited,
+  tokenIn,
+  tokenOut,
+  spendIn,
+  spendCap,
+  balanceIn,
+  balancesLoaded,
+  ethBalance,
+  impact,
+  tolerableLocked,
+  customWei,
+  minOutWei,
+  maxInWei,
+  phase,
+  typedAmount,
+}) {
+  if (phase) return { ready: false, label: phase };
+  if (kind === 'same') return { ready: false, label: 'Choose two different tokens' };
+  if (kind === 'pool' && pair.loading && !pair.exists) return { ready: false, label: 'Loading pool…' };
+  if (kind === 'pool' && pair.error) return { ready: false, label: 'Network unavailable' };
+  if (typedAmount && typedAmount > 0n && kind === 'pool' && !pair.loading && !pair.exists) {
+    return { ready: false, label: 'No pool for this pair' };
+  }
+  if (typedAmount && typedAmount > 0n && kind === 'pool' && !pair.loading && pair.reserveA === 0n) {
+    return { ready: false, label: 'Pool has no liquidity' };
+  }
+  if (typedAmount && typedAmount > 0n && kind === 'pool' && !quote) {
+    return { ready: false, label: lastEdited === 'OUT' ? 'Not enough liquidity' : 'Amount is too small' };
+  }
+  if (!quote) return { ready: false, label: 'Enter an amount' };
+  if (spendIn > spendCap) {
+    if (tokenIn === 'ETH' && spendIn <= balanceIn) {
+      return { ready: false, label: 'Leave a little ETH for gas' };
+    }
+    return { ready: false, label: `Insufficient ${tokenIn} balance` };
+  }
+  if (balancesLoaded && tokenIn !== 'ETH' && ethBalance === 0n) {
+    return { ready: false, label: 'You need ETH for gas' };
+  }
+  if (kind === 'pool' && tolerableLocked) {
+    if (customWei == null) {
+      return { ready: false, label: lastEdited === 'IN' ? 'Enter a valid minimum' : 'Enter a valid maximum' };
+    }
+    if (lastEdited === 'IN' && customWei > quote.outWei) {
+      return { ready: false, label: 'Minimum is above the quote' };
+    }
+    if (lastEdited === 'OUT' && customWei < quote.inWei) {
+      return { ready: false, label: 'Maximum is below the quote' };
+    }
+  }
+  if (kind === 'pool' && (minOutWei == null || maxInWei == null)) {
+    return { ready: false, label: 'Enter a valid slippage limit' };
+  }
+  if (kind === 'wrap') {
+    return { ready: true, label: tokenIn === 'ETH' ? 'Wrap ETH' : 'Unwrap WETH' };
+  }
+  if (impact != null && impact >= IMPACT_HIGH_BPS) {
+    return { ready: true, label: 'Swap anyway' };
+  }
+  return { ready: true, label: `Swap ${tokenIn} for ${tokenOut}` };
+}
+
+function impactClass(impact) {
+  if (impact == null) return '';
+  if (impact >= IMPACT_HIGH_BPS) return 'impact-high';
+  if (impact >= IMPACT_WARN_BPS) return 'impact-warn';
+  return '';
 }
