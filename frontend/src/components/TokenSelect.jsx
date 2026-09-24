@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { ChevronDown } from 'lucide-react';
 import { TRADABLE } from '../utils/tokens';
 
-export default function TokenSelect({ symbol, onChange }) {
+export default function TokenSelect({ symbol, onChange, options = TRADABLE }) {
   const [open, setOpen] = useState(false);
   const rootRef = useRef(null);
 
@@ -29,7 +29,7 @@ export default function TokenSelect({ symbol, onChange }) {
       </button>
       {open ? (
         <div className="token-menu" role="listbox" aria-label="Choose token">
-          {TRADABLE.map((token) => (
+          {options.map((token) => (
             <button
               type="button"
               key={token.symbol}

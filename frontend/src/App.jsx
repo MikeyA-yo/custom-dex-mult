@@ -134,7 +134,7 @@ function DexContent() {
             }}
           >
             <ArrowLeftRight size={14} />
-            <span>Swap</span>
+            <span>Trade</span>
           </button>
 
           <button

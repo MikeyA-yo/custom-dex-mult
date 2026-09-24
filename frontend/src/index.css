@@ -729,6 +729,56 @@ h1, h2, h3, h4 {
   white-space: nowrap;
 }
 
+.trade-hint {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 0.82rem;
+  line-height: 1.4;
+}
+
+.market-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.market-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  border: 1px solid #1a2232;
+  background: #0c0f16;
+}
+
+.market-row.is-active {
+  border-color: rgba(37, 99, 235, 0.45);
+}
+
+.market-row strong {
+  display: block;
+  font-size: 0.92rem;
+}
+
+.market-row p,
+.market-actions {
+  margin: 0;
+}
+
+.market-row p {
+  color: var(--text-secondary);
+  font-size: 0.75rem;
+  margin-top: 2px;
+}
+
+.market-actions {
+  display: flex;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
 @media (max-width: 560px) {
   .faucet-bar,
   .amount-meta,
@@ -745,5 +795,10 @@ h1, h2, h3, h4 {
 
   .stat-row span:last-child {
     text-align: left;
+  }
+
+  .market-row {
+    align-items: flex-start;
+    flex-direction: column;
   }
 }

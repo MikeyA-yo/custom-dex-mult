@@ -2,9 +2,9 @@ import { useMemo, useState } from 'react';
 import { ArrowDown, ArrowUpDown, Settings } from 'lucide-react';
 import { ethers } from 'ethers';
 import { useWeb3 } from '../hooks/useWeb3';
-import { useBalances, usePair } from '../hooks/useMarket';
+import { useBalances, usePair, usePositions } from '../hooks/useMarket';
 import { ABIS } from '../utils/contracts';
-import { pairKind, underlyingSymbol } from '../utils/tokens';
+import { TRADABLE, pairKind, underlyingSymbol } from '../utils/tokens';
 import { ensureAllowance } from '../utils/dexTx';
 import {
   IMPACT_HIGH_BPS,
@@ -27,6 +27,8 @@ import AmountField from './AmountField';
 import StatusBanner from './StatusBanner';
 
 const SLIPPAGE_PRESETS = [0.1, 0.5, 1];
+const QUOTE_ASSETS = TRADABLE.filter((token) => token.symbol !== 'ETH');
+const LISTED = ['10X', 'AYO'];
 
 export default function SwapCard() {
   const {
@@ -42,8 +44,12 @@ export default function SwapCard() {
     bumpData,
   } = useWeb3();
 
-  const [tokenIn, setTokenIn] = useState('10X');
-  const [tokenOut, setTokenOut] = useState('AYO');
+  const [tradeMode, setTradeMode] = useState('buy');
+  const [asset, setAsset] = useState('10X');
+  const [swapIn, setSwapIn] = useState('10X');
+  const [swapOut, setSwapOut] = useState('AYO');
+  const tokenIn = tradeMode === 'buy' ? 'ETH' : tradeMode === 'sell' ? asset : swapIn;
+  const tokenOut = tradeMode === 'buy' ? asset : tradeMode === 'sell' ? 'ETH' : swapOut;
   const [amountIn, setAmountIn] = useState('');
   const [amountOut, setAmountOut] = useState('');
   const [lastEdited, setLastEdited] = useState('IN');
@@ -57,6 +63,7 @@ export default function SwapCard() {
   const [status, setStatus] = useState(null);
 
   const { balances, error: balanceError, loaded: balancesLoaded } = useBalances();
+  const { positions, loading: pricesLoading } = usePositions();
   const pair = usePair(tokenIn, tokenOut);
   const kind = pairKind(tokenIn, tokenOut);
 
@@ -95,28 +102,76 @@ export default function SwapCard() {
   const spendCap = tokenIn === 'ETH' ? maxSpendableEth(balanceIn) : balanceIn;
   const spendIn = lastEdited === 'IN' ? (quote?.inWei ?? 0n) : (maxInWei ?? 0n);
 
+  const resetQuoteInputs = () => {
+    setAmountIn('');
+    setAmountOut('');
+    setLastEdited('IN');
+    setTolerableLocked(false);
+    setCustomTolerable('');
+    setStatus(null);
+  };
+
   const chooseIn = (symbol) => {
-    if (symbol === tokenOut) setTokenOut(tokenIn);
-    setTokenIn(symbol);
+    if (tradeMode === 'sell') {
+      setAsset(symbol);
+    } else if (tradeMode === 'swap') {
+      if (symbol === swapOut) setSwapOut(swapIn);
+      setSwapIn(symbol);
+    }
     setTolerableLocked(false);
     setStatus(null);
   };
 
   const chooseOut = (symbol) => {
-    if (symbol === tokenIn) setTokenIn(tokenOut);
-    setTokenOut(symbol);
+    if (tradeMode === 'buy') {
+      setAsset(symbol);
+    } else if (tradeMode === 'swap') {
+      if (symbol === swapIn) setSwapIn(swapOut);
+      setSwapOut(symbol);
+    }
     setTolerableLocked(false);
     setStatus(null);
   };
 
+  const selectMode = (mode) => {
+    if (mode === tradeMode) return;
+    if (mode !== 'swap' && tradeMode === 'swap') {
+      const nextAsset = swapOut !== 'ETH' ? swapOut : (swapIn !== 'ETH' ? swapIn : asset);
+      setAsset(nextAsset);
+    }
+    if (mode === 'swap' && tradeMode === 'buy') {
+      setSwapIn('ETH');
+      setSwapOut(asset);
+    }
+    if (mode === 'swap' && tradeMode === 'sell') {
+      setSwapIn(asset);
+      setSwapOut('ETH');
+    }
+    setTradeMode(mode);
+    resetQuoteInputs();
+  };
+
+  const openListed = (mode, symbol) => {
+    if (tradeMode === mode && asset === symbol) return;
+    setTradeMode(mode);
+    setAsset(symbol);
+    resetQuoteInputs();
+  };
+
   const switchTokens = () => {
-    const nextPay = lastEdited === 'OUT'
+    const received = lastEdited === 'OUT'
       ? amountOut
       : (quote ? ethers.formatEther(quote.outWei) : '');
-    setTokenIn(tokenOut);
-    setTokenOut(tokenIn);
+    if (tradeMode === 'buy') {
+      setTradeMode('sell');
+    } else if (tradeMode === 'sell') {
+      setTradeMode('buy');
+    } else {
+      setSwapIn(swapOut);
+      setSwapOut(swapIn);
+    }
     setLastEdited('IN');
-    setAmountIn(nextPay);
+    setAmountIn(received);
     setAmountOut('');
     setTolerableLocked(false);
     setStatus(null);
@@ -157,6 +212,7 @@ export default function SwapCard() {
     maxInWei,
     phase,
     typedAmount,
+    tradeMode,
   });
 
   const handleSwap = async () => {
@@ -192,7 +248,7 @@ export default function SwapCard() {
           });
         }
 
-        setPhase('Swapping…');
+        setPhase(tradeMode === 'buy' ? 'Buying…' : tradeMode === 'sell' ? 'Selling…' : 'Swapping…');
         let tx;
         if (tokenIn === 'ETH' && lastEdited === 'IN') {
           tx = await router.swapExactETHForTokens(minOutWei, path, account, ttl, { value: quote.inWei });
@@ -214,7 +270,11 @@ export default function SwapCard() {
         type: 'success',
         text: kind === 'wrap'
           ? (tokenIn === 'ETH' ? 'Wrapped ETH into WETH.' : 'Unwrapped WETH into ETH.')
-          : `Swapped ${tokenIn} for ${tokenOut}.`,
+          : tradeMode === 'buy'
+            ? `Bought ${tokenOut} with ${tokenIn}.`
+            : tradeMode === 'sell'
+              ? `Sold ${tokenIn} for ${tokenOut}.`
+              : `Swapped ${tokenIn} for ${tokenOut}.`,
       });
       setAmountIn('');
       setAmountOut('');
@@ -239,7 +299,7 @@ export default function SwapCard() {
   return (
     <div className="glass-panel dex-card">
       <div className="card-head">
-        <h2>Swap</h2>
+        <h2>{tradeMode === 'buy' ? 'Buy' : tradeMode === 'sell' ? 'Sell' : 'Swap'}</h2>
         <div className="card-head-actions">
           <span className="network-pill">{activeNetworkConfig.shortName}</span>
           <button
@@ -252,6 +312,42 @@ export default function SwapCard() {
           </button>
         </div>
       </div>
+
+      <div className="segmented" role="tablist" aria-label="Trade type">
+        {['buy', 'sell', 'swap'].map((mode) => (
+          <button
+            type="button"
+            key={mode}
+            role="tab"
+            aria-selected={tradeMode === mode}
+            className={tradeMode === mode ? 'is-active' : undefined}
+            onClick={() => selectMode(mode)}
+          >
+            {mode === 'buy' ? 'Buy' : mode === 'sell' ? 'Sell' : 'Swap'}
+          </button>
+        ))}
+      </div>
+      <p className="trade-hint">
+        {tradeMode === 'buy'
+          ? (asset === 'WETH'
+            ? 'Buying WETH wraps ETH at 1:1. 10X and AYO are bought from their ETH pools.'
+            : `Spend ETH to buy ${asset}. The trade uses the ${asset}/WETH pool.`)
+          : tradeMode === 'sell'
+            ? (asset === 'WETH'
+              ? 'Selling WETH unwraps it back into ETH.'
+              : `Sell ${asset} for ETH from the ${asset}/WETH pool.`)
+            : 'Swap any pair directly, including 10X for AYO.'}
+      </p>
+
+      <MarketList
+        positions={positions}
+        loading={pricesLoading}
+        balances={balances}
+        activeSymbol={tradeMode === 'swap' ? '' : asset}
+        activeMode={tradeMode}
+        onBuy={(symbol) => openListed('buy', symbol)}
+        onSell={(symbol) => openListed('sell', symbol)}
+      />
 
       {showSettings && kind === 'pool' ? (
         <div className="settings-panel">
@@ -314,7 +410,7 @@ export default function SwapCard() {
       {status ? <StatusBanner type={status.type}>{status.text}</StatusBanner> : null}
 
       <AmountField
-        label="You pay"
+        label={tradeMode === 'sell' ? 'You sell' : 'You pay'}
         amount={shownIn}
         onAmount={(value) => {
           setLastEdited('IN');
@@ -328,16 +424,23 @@ export default function SwapCard() {
         account={account}
         loading={kind === 'pool' && pair.loading}
         showQuickAmounts
+        locked={tradeMode === 'buy'}
+        options={tradeMode === 'sell' ? QUOTE_ASSETS : TRADABLE}
       />
 
       <div className="flip-row">
-        <button type="button" className="flip-btn" onClick={switchTokens} aria-label="Switch tokens">
+        <button
+          type="button"
+          className="flip-btn"
+          onClick={switchTokens}
+          aria-label={tradeMode === 'buy' ? 'Switch to sell' : tradeMode === 'sell' ? 'Switch to buy' : 'Switch tokens'}
+        >
           <ArrowDown size={15} />
         </button>
       </div>
 
       <AmountField
-        label="You receive"
+        label={tradeMode === 'buy' ? 'You buy' : 'You receive'}
         amount={shownOut}
         onAmount={(value) => {
           setLastEdited('OUT');
@@ -350,6 +453,8 @@ export default function SwapCard() {
         balance={balances[tokenOut] ?? 0n}
         account={account}
         loading={kind === 'pool' && pair.loading}
+        locked={tradeMode === 'sell'}
+        options={tradeMode === 'buy' ? QUOTE_ASSETS : TRADABLE}
       />
 
       {rateValue != null ? (
@@ -469,6 +574,7 @@ function describeSwap({
   maxInWei,
   phase,
   typedAmount,
+  tradeMode,
 }) {
   if (phase) return { ready: false, label: phase };
   if (kind === 'same') return { ready: false, label: 'Choose two different tokens' };
@@ -511,9 +617,49 @@ function describeSwap({
     return { ready: true, label: tokenIn === 'ETH' ? 'Wrap ETH' : 'Unwrap WETH' };
   }
   if (impact != null && impact >= IMPACT_HIGH_BPS) {
+    if (tradeMode === 'buy') return { ready: true, label: 'Buy anyway' };
+    if (tradeMode === 'sell') return { ready: true, label: 'Sell anyway' };
     return { ready: true, label: 'Swap anyway' };
   }
+  if (tradeMode === 'buy') return { ready: true, label: `Buy ${tokenOut}` };
+  if (tradeMode === 'sell') return { ready: true, label: `Sell ${tokenIn}` };
   return { ready: true, label: `Swap ${tokenIn} for ${tokenOut}` };
+}
+
+function MarketList({ positions, loading, balances, activeSymbol, activeMode, onBuy, onSell }) {
+  return (
+    <div className="market-list">
+      {LISTED.map((symbol) => {
+        const pool = positions.find((position) => position.base === symbol && position.quote === 'WETH');
+        const price = pool?.exists ? spotOutPerIn(pool.reserveBase, pool.reserveQuote) : null;
+        const held = balances[symbol] ?? 0n;
+        const active = activeSymbol === symbol && (activeMode === 'buy' || activeMode === 'sell');
+        return (
+          <div key={symbol} className={active ? 'market-row is-active' : 'market-row'}>
+            <div>
+              <strong>{symbol}</strong>
+              <p>
+                {loading && !pool?.exists
+                  ? 'Loading price…'
+                  : price
+                    ? `1 ${symbol} = ${formatTokenAmount(price, 6)} ETH`
+                    : 'No ETH pool yet'}
+                {held > 0n ? ` · You hold ${formatTokenAmount(held)}` : ''}
+              </p>
+            </div>
+            <div className="market-actions">
+              <button type="button" className="chip chip-accent" onClick={() => onBuy(symbol)}>
+                Buy
+              </button>
+              <button type="button" className="chip" onClick={() => onSell(symbol)}>
+                Sell
+              </button>
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
 }
 
 function impactClass(impact) {

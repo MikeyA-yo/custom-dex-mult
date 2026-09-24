@@ -13,6 +13,8 @@ export default function AmountField({
   account,
   loading,
   showQuickAmounts,
+  locked = false,
+  options,
 }) {
   const spendable = symbol === 'ETH' ? maxSpendableEth(balance ?? 0n) : (balance ?? 0n);
 
@@ -55,7 +57,11 @@ export default function AmountField({
           onChange={(event) => onAmount(sanitizeAmount(event.target.value))}
           autoComplete="off"
         />
-        <TokenSelect symbol={symbol} onChange={onSymbol} />
+        {locked ? (
+          <div className="token-badge">{symbol}</div>
+        ) : (
+          <TokenSelect symbol={symbol} onChange={onSymbol} options={options} />
+        )}
       </div>
     </div>
   );
