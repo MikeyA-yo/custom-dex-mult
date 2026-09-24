@@ -15,6 +15,7 @@ export default function AmountField({
   showQuickAmounts,
   locked = false,
   options,
+  fiat,
 }) {
   const spendable = symbol === 'ETH' ? maxSpendableEth(balance ?? 0n) : (balance ?? 0n);
 
@@ -63,6 +64,7 @@ export default function AmountField({
           <TokenSelect symbol={symbol} onChange={onSymbol} options={options} />
         )}
       </div>
+      {fiat ? <div className="fiat-line">{fiat}</div> : null}
     </div>
   );
 }

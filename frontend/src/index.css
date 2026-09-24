@@ -508,6 +508,13 @@ h1, h2, h3, h4 {
   font-size: clamp(1.15rem, 4.5vw, 1.85rem);
 }
 
+.fiat-line {
+  margin-top: 6px;
+  color: var(--text-muted);
+  font-size: 0.78rem;
+  font-variant-numeric: tabular-nums;
+}
+
 .chip {
   background: #161d2a;
   border: 1px solid #232d3f;

@@ -128,6 +128,37 @@ export function formatImpact(bps) {
   return `${pct.toFixed(2)}%`;
 }
 
+const USD_SCALE = 10n ** 8n;
+
+/** ETH per one whole token, from the token/WETH pool. ETH and WETH are 1. */
+export function ethPerWholeToken(symbol, positions) {
+  if (symbol === 'ETH' || symbol === 'WETH') return ETHER;
+  const pool = positions?.find((position) => position.base === symbol && position.quote === 'WETH');
+  if (!pool?.exists || pool.reserveBase === 0n || pool.reserveQuote === 0n) return null;
+  return spotOutPerIn(pool.reserveBase, pool.reserveQuote);
+}
+
+/** Dollar value scaled by 1e8. Uses the pool ETH price times the ETH/USD rate. */
+export function usdScaled(tokenWei, ethPerToken, ethUsd) {
+  if (typeof tokenWei !== 'bigint' || tokenWei <= 0n || typeof ethPerToken !== 'bigint' || ethPerToken <= 0n) return null;
+  if (!Number.isFinite(ethUsd) || ethUsd <= 0) return null;
+  const ethUsdScaled = BigInt(Math.round(ethUsd * 1e8));
+  const ethWei = (tokenWei * ethPerToken) / ETHER;
+  return (ethWei * ethUsdScaled) / ETHER;
+}
+
+export function formatUsdScaled(scaled) {
+  if (scaled == null) return null;
+  if (scaled <= 0n) return '$0.00';
+  if (scaled < 100n) return '<$0.000001';
+  const whole = scaled / USD_SCALE;
+  const frac = (scaled % USD_SCALE).toString().padStart(8, '0');
+  const wholeFmt = whole.toString().replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+  if (whole >= 1n) return `$${wholeFmt}.${frac.slice(0, 2)}`;
+  const trimmed = frac.slice(0, 6).replace(/0+$/, '');
+  return `$${wholeFmt}.${trimmed}`;
+}
+
 export function deadline(minutes = 20) {
   return Math.floor(Date.now() / 1000) + minutes * 60;
 }

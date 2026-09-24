@@ -3,6 +3,7 @@ import { ArrowDown, ArrowUpDown, Settings } from 'lucide-react';
 import { ethers } from 'ethers';
 import { useWeb3 } from '../hooks/useWeb3';
 import { useBalances, usePair, usePositions } from '../hooks/useMarket';
+import { useEthUsd } from '../hooks/useEthUsd';
 import { ABIS } from '../utils/contracts';
 import { TRADABLE, pairKind, underlyingSymbol } from '../utils/tokens';
 import { ensureAllowance } from '../utils/dexTx';
@@ -13,9 +14,12 @@ import {
   applySlippageUp,
   deadline,
   decodeRevert,
+  ethPerWholeToken,
   formatImpact,
   formatTokenAmount,
   formatTokenInput,
+  formatUsdScaled,
+  usdScaled,
   getAmountIn,
   getAmountOut,
   maxSpendableEth,
@@ -64,6 +68,7 @@ export default function SwapCard() {
 
   const { balances, error: balanceError, loaded: balancesLoaded } = useBalances();
   const { positions, loading: pricesLoading } = usePositions();
+  const { ethUsd, error: ethUsdError } = useEthUsd();
   const pair = usePair(tokenIn, tokenOut);
   const kind = pairKind(tokenIn, tokenOut);
 
@@ -345,6 +350,8 @@ export default function SwapCard() {
         balances={balances}
         activeSymbol={tradeMode === 'swap' ? '' : asset}
         activeMode={tradeMode}
+        ethUsd={ethUsd}
+        ethUsdError={ethUsdError}
         onBuy={(symbol) => openListed('buy', symbol)}
         onSell={(symbol) => openListed('sell', symbol)}
       />
@@ -426,6 +433,7 @@ export default function SwapCard() {
         showQuickAmounts
         locked={tradeMode === 'buy'}
         options={tradeMode === 'sell' ? QUOTE_ASSETS : TRADABLE}
+        fiat={dollarLabel(shownIn, tokenIn, positions, ethUsd)}
       />
 
       <div className="flip-row">
@@ -455,6 +463,7 @@ export default function SwapCard() {
         loading={kind === 'pool' && pair.loading}
         locked={tradeMode === 'sell'}
         options={tradeMode === 'buy' ? QUOTE_ASSETS : TRADABLE}
+        fiat={dollarLabel(shownOut, tokenOut, positions, ethUsd)}
       />
 
       {rateValue != null ? (
@@ -475,7 +484,10 @@ export default function SwapCard() {
         <div className="stat-box">
           <div className="stat-row">
             <span>Pool price</span>
-            <span>{spot ? `1 ${tokenIn} = ${formatTokenAmount(spot, 6)} ${tokenOut}` : '—'}</span>
+            <span>
+              {spot ? `1 ${tokenIn} = ${formatTokenAmount(spot, 6)} ${tokenOut}` : '—'}
+              {dollarLabel('1', tokenIn, positions, ethUsd) ? ` · ${dollarLabel('1', tokenIn, positions, ethUsd)}` : ''}
+            </span>
           </div>
           <div className="stat-row">
             <span>Price impact</span>
@@ -626,12 +638,23 @@ function describeSwap({
   return { ready: true, label: `Swap ${tokenIn} for ${tokenOut}` };
 }
 
-function MarketList({ positions, loading, balances, activeSymbol, activeMode, onBuy, onSell }) {
+function dollarLabel(amountText, symbol, positions, ethUsd) {
+  const wei = tryParseEther(amountText);
+  if (wei == null || wei === 0n) return '';
+  return formatUsdScaled(usdScaled(wei, ethPerWholeToken(symbol, positions), ethUsd)) ?? '';
+}
+
+function MarketList({ positions, loading, balances, activeSymbol, activeMode, ethUsd, ethUsdError, onBuy, onSell }) {
+  const ethLabel = formatUsdScaled(usdScaled(10n ** 18n, 10n ** 18n, ethUsd));
   return (
     <div className="market-list">
+      <p className="trade-hint">
+        {ethLabel ? `ETH ${ethLabel}` : ethUsdError ? ethUsdError : 'Loading the ETH dollar price…'}
+      </p>
       {LISTED.map((symbol) => {
         const pool = positions.find((position) => position.base === symbol && position.quote === 'WETH');
         const price = pool?.exists ? spotOutPerIn(pool.reserveBase, pool.reserveQuote) : null;
+        const unitUsd = price ? formatUsdScaled(usdScaled(10n ** 18n, price, ethUsd)) : null;
         const held = balances[symbol] ?? 0n;
         const active = activeSymbol === symbol && (activeMode === 'buy' || activeMode === 'sell');
         return (
@@ -642,7 +665,7 @@ function MarketList({ positions, loading, balances, activeSymbol, activeMode, on
                 {loading && !pool?.exists
                   ? 'Loading price…'
                   : price
-                    ? `1 ${symbol} = ${formatTokenAmount(price, 6)} ETH`
+                    ? `1 ${symbol} = ${formatTokenAmount(price, 6)} ETH${unitUsd ? ` · ${unitUsd}` : ''}`
                     : 'No ETH pool yet'}
                 {held > 0n ? ` · You hold ${formatTokenAmount(held)}` : ''}
               </p>

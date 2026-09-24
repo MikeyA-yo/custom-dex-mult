@@ -2,15 +2,19 @@ import { useState } from 'react';
 import { ArrowDown } from 'lucide-react';
 import { ethers } from 'ethers';
 import { useWeb3 } from '../hooks/useWeb3';
-import { useBalances, usePair } from '../hooks/useMarket';
+import { useBalances, usePair, usePositions } from '../hooks/useMarket';
+import { useEthUsd } from '../hooks/useEthUsd';
 import { ensureAllowance } from '../utils/dexTx';
 import { pairKind, underlyingSymbol } from '../utils/tokens';
 import {
   applySlippageDown,
   deadline,
   decodeRevert,
+  ethPerWholeToken,
   formatShare,
   formatTokenAmount,
+  formatUsdScaled,
+  usdScaled,
   maxSpendableEth,
   quoteLiquidity,
   spotOutPerIn,
@@ -78,6 +82,8 @@ function AddLiquidity() {
   const [status, setStatus] = useState(null);
 
   const { balances, error: balanceError, loaded: balancesLoaded } = useBalances();
+  const { positions } = usePositions();
+  const { ethUsd } = useEthUsd();
   const pair = usePair(tokenA, tokenB);
   const kind = pairKind(tokenA, tokenB);
   const poolEmpty = kind === 'pool' && (!pair.exists || pair.reserveA === 0n || pair.reserveB === 0n);
@@ -257,6 +263,7 @@ function AddLiquidity() {
         account={account}
         loading={kind === 'pool' && pair.loading}
         showQuickAmounts
+        fiat={formatUsdScaled(usdScaled(tryParseEther(shownA) ?? 0n, ethPerWholeToken(tokenA, positions), ethUsd)) ?? ''}
       />
 
       <div className="flip-row">
@@ -279,13 +286,19 @@ function AddLiquidity() {
         account={account}
         loading={kind === 'pool' && pair.loading}
         showQuickAmounts
+        fiat={formatUsdScaled(usdScaled(tryParseEther(shownB) ?? 0n, ethPerWholeToken(tokenB, positions), ethUsd)) ?? ''}
       />
 
       {kind === 'pool' && ratioKnown ? (
         <div className="stat-box">
           <div className="stat-row">
             <span>Pool price</span>
-            <span>1 {tokenA} = {formatTokenAmount(spot ?? 0n, 6)} {tokenB}</span>
+            <span>
+              1 {tokenA} = {formatTokenAmount(spot ?? 0n, 6)} {tokenB}
+              {formatUsdScaled(usdScaled(10n ** 18n, ethPerWholeToken(tokenA, positions), ethUsd))
+                ? ` · ${formatUsdScaled(usdScaled(10n ** 18n, ethPerWholeToken(tokenA, positions), ethUsd))}`
+                : ''}
+            </span>
           </div>
           <div className="stat-row">
             <span>Reserves</span>
